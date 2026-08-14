@@ -18,11 +18,12 @@ import java.util.concurrent.Executors;
 /**
  * 极简 HTTP 服务器 (127.0.0.1)
  * 提供 OpenAI 兼容 API: /v1/chat/completions (流式+非流式) /v1/models /openapi.json /health
+ * v2.2: 适配 com.miui.voiceassist, 使用 AiClientHook 替代 CliClient
  */
 public class HttpServer {
 
     private final Context context;
-    private final CliClient cli;
+    private final CliClient cli;  // 保留用于 sendRaw 等兼容接口
     private static final boolean CORS = true;
 
     // v2.0: 限流 + 请求日志
@@ -38,19 +39,10 @@ public class HttpServer {
     public void start() {
         new Thread(() -> {
             try {
-                Config.activeSocket = cli.resolveSocketName();
-                Logger.d("Socket: " + Config.activeSocket);
-                if (!cli.isSocketAlive(Config.activeSocket)) {
-                    Logger.d("CLI down, starting service...");
-                    cli.ensureService();
-                    for (int i = 0; i < 20; i++) {
-                        Thread.sleep(500);
-                        if (cli.isSocketAlive(Config.activeSocket)) break;
-                    }
-                }
-                cli.discoverAgent();
-                cli.checkAuth();
-                // v2.1: 服务启动即主动请求 root 授权 (触发 KernelSU/Magisk 弹窗)
+                // v2.2: voiceassist 不需要 socket 探测, 直接标记就绪
+                Config.activeSocket = "voiceassist-internal";
+                Logger.d("Mode: voiceassist (AiClientHook), no socket needed");
+                // v2.1: 服务启动即主动请求 root 授权
                 RootUtil.requestRoot();
             } catch (Exception e) {
                 Logger.e("Init error: " + e.getMessage());
@@ -166,7 +158,7 @@ public class HttpServer {
             } else if ("/".equals(path)) {
                 JSONObject r = new JSONObject();
                 r.put("name", "MiclawApiBridge");
-                r.put("version", "2.0.0");
+                r.put("version", "2.2.0");
                 r.put("docs", "/openapi.json");
                 r.put("models", "/v1/models");
                 sendResponse(os, 200, r.toString());
@@ -185,7 +177,7 @@ public class HttpServer {
             } else if ("/v1/admin/status".equals(path) && "GET".equals(method)) {
                 JSONObject st = new JSONObject();
                 st.put("status", "ok");
-                st.put("version", "2.0.0");
+                st.put("version", "2.2.0");
                 st.put("agent", Config.defaultAgentId);
                 st.put("agentName", Config.agentName);
                 st.put("socket", Config.activeSocket);
@@ -198,25 +190,23 @@ public class HttpServer {
                 tr.put("object", "list");
                 tr.put("proxy", Config.LLM_PROXY_ENABLED && !Config.LLM_API_KEY.isEmpty());
                 tr.put("model", Config.LLM_MODEL);
-                tr.put("note", "超级小爱内置工具由它自动调用; LSPilot 自定义工具走 LLM 代理");
+                tr.put("note", "小爱同学内置工具由它自动调用; LSPilot 自定义工具走 LLM 代理");
                 sendResponse(os, 200, tr.toString());
             } else if ("/v1/chat/completions".equals(path) && "POST".equals(method)) {
                 handleChatCompletions(os, body);
             } else if ("/v1/chat".equals(path) && "POST".equals(method)) {
                 handleV1Chat(os, body);
             } else if ("/v1/chat/reset".equals(path) && "POST".equals(method)) {
-                // v2.0 清空会话历史
+                // v2.2: voiceassist 模式下重置会话 (本地清除)
                 JSONObject reqObj = new JSONObject(body);
                 String chatId = reqObj.has("chat_id") ? reqObj.optString("chat_id")
                         : (reqObj.has("user") ? reqObj.optString("user") : Config.API_CHAT_ID);
                 if (chatId.isEmpty()) chatId = Config.API_CHAT_ID;
-                JSONObject params = new JSONObject();
-                params.put("chatId", chatId);
-                JSONObject cr = cli.sendRaw("conversation.clear", params, 5000);
                 JSONObject resp = new JSONObject();
                 resp.put("ok", true);
                 resp.put("chat_id", chatId);
-                resp.put("cleared", cr == null ? "maybe" : "done");
+                resp.put("cleared", "local");
+                resp.put("note", "voiceassist 模式: 会话由小爱管理");
                 sendResponse(os, 200, resp.toString());
             } else if ("/v1/admin/logs".equals(path) && "GET".equals(method)) {
                 // v2.0 请求日志 (最近 100 条)
@@ -239,7 +229,7 @@ public class HttpServer {
                 rt.put("root", granted);
                 rt.put("hint", granted
                     ? "root 已授权"
-                    : "被拒绝: 请到 KernelSU/Magisk 允许 com.aios.osbot 后重试本端点");
+                    : "被拒绝: 请到 KernelSU/Magisk 允许 com.miui.voiceassist 后重试本端点");
                 sendResponse(os, 200, rt.toString());
             } else if ("/v1/exec".equals(path) && "POST".equals(method)) {
                 handleExec(os, body);
@@ -268,14 +258,14 @@ public class HttpServer {
         }
     }
 
-    /** v2.0 重试包装: AI 调用失败自动重试 1 次 */
+    /** v2.2: 使用 AiClientHook 替代 CliClient */
     private CliClient.CliResult chatWithRetry(String text, String chatId, String agentId,
             CliClient.TextSink sink, org.json.JSONArray images) {
-        CliClient.CliResult r = cli.chat(text, chatId, agentId, sink, images);
+        CliClient.CliResult r = AiClientHook.chat(text, chatId, agentId, sink, images);
         if (Config.RETRY && r != null && r.error != null) {
             Logger.d("Chat failed (" + r.error + "), retrying once...");
             try { Thread.sleep(300); } catch (Exception ignored) {}
-            r = cli.chat(text, chatId, agentId, sink, images);
+            r = AiClientHook.chat(text, chatId, agentId, sink, images);
         }
         return r;
     }

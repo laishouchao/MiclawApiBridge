@@ -101,10 +101,10 @@ public class OpenAiCompat {
 
             String[][] models = {
                 {Config.defaultAgentId, Config.agentName},
-                {"osbot.taiyi", "端侧Agent"},
-                {"osbot.calendar", "日程助手"},
-                {"software-dev", "软件开发官"},
-                {"400000000000024", "Wind投资助手"}
+                {"voiceassist.nlp", "NLP语义理解"},
+                {"voiceassist.chat", "AI对话"},
+                {"voiceassist.skill", "技能服务"},
+                {"xiaomi.ai", "小米AI引擎"}
             };
 
             for (String[] m : models) {
@@ -151,7 +151,7 @@ public class OpenAiCompat {
             JSONObject info = new JSONObject();
             info.put("title", "MiclawApiBridge");
             info.put("version", "1.1.0");
-            info.put("description", "把小米超级小爱(com.aios.osbot)的 AI 能力暴露为 OpenAI 兼容 API");
+            info.put("description", "把小米小爱同学(com.miui.voiceassist)的 AI 能力暴露为 OpenAI 兼容 API");
             doc.put("info", info);
 
             JSONObject paths = new JSONObject();

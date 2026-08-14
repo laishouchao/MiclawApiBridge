@@ -33,10 +33,10 @@ public class Config {
     // 路由表: 前缀 -> "BaseURL|APIKey|模型名" (来自设置界面, key 只存本机)
     public static java.util.Map<String, String> LLM_ROUTES = new java.util.HashMap<>();
 
-    // 运行时自动探测
-    public static String activeSocket = CLI_SOCKET;
-    public static String defaultAgentId = "osbot.main";
-    public static String agentName = "MiClaw";
+    // 运行时状态
+    public static String activeSocket = "voiceassist-internal";
+    public static String defaultAgentId = "voiceassist.main";
+    public static String agentName = "XiaoAi";
 
     /** 从设置读取配置 (模块 UI 保存后, 宿主进程启动时调用) */
     public static void loadFrom(Context context) {
