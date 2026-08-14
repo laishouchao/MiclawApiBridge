@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
         root.addView(tvTitle);
 
         TextView tvSub = new TextView(this);
-        tvSub.setText("把小米超级小爱 (com.aios.osbot) 暴露为本机 OpenAI 兼容 API\n设置保存在本机, 保存后需重启超级小爱生效");
+        tvSub.setText("把小爱同学 (com.miui.voiceassist) 暴露为本机 OpenAI 兼容 API\n设置保存在本机, 保存后需重启小爱同学生效");
         tvSub.setTextSize(12);
         tvSub.setTextColor(Color.parseColor("#666666"));
         tvSub.setPadding(0, 0, 0, dp(12));
@@ -89,7 +89,7 @@ public class MainActivity extends Activity {
         root.addView(tvRoot);
 
         Button btnRoot = new Button(this);
-        btnRoot.setText("立即授权 Root (触发弹窗, 无需重启)");
+        btnRoot.setText("测试 Root 连通 (仅测试本APP, 授权需去Magisk给voiceassist)");
         btnRoot.setOnClickListener(v -> requestRootNow());
         root.addView(btnRoot);
 
@@ -230,14 +230,14 @@ public class MainActivity extends Activity {
                     tvStatus.setText("● 服务运行中: http://127.0.0.1:" + targetPort);
                     tvStatus.setTextColor(Color.parseColor("#188038"));
                 } else {
-                    tvStatus.setText("○ 服务未运行: 127.0.0.1:" + targetPort + " (需 LSPosed 启用模块 + 作用域勾选 com.aios.osbot + 重启超级小爱)");
+                    tvStatus.setText("○ 服务未运行: 127.0.0.1:" + targetPort + " (需 LSPosed 启用模块 + 作用域勾选 com.miui.voiceassist + 重启小爱同学)");
                     tvStatus.setTextColor(Color.parseColor("#D93025"));
                 }
                 if (rootOk) {
                     tvRoot.setText("🔑 Root: 可用 (su 正常, /v1/exec 代码执行已开启)");
                     tvRoot.setTextColor(Color.parseColor("#188038"));
                 } else {
-                    tvRoot.setText("🔑 Root: 不可用 - 请到 Magisk/KernelSU 授权 com.aios.osbot (或不用 /v1/exec)");
+                    tvRoot.setText("🔑 Root: 不可用 - 请到 Magisk/KernelSU 授权 com.miui.voiceassist (或不用 /v1/exec)");
                     tvRoot.setTextColor(Color.parseColor("#B06000"));
                 }
             });
@@ -246,16 +246,16 @@ public class MainActivity extends Activity {
 
     /** 主动请求 root 授权: 触发 KernelSU/Magisk 弹窗, 不重启即时生效 */
     private void requestRootNow() {
-        tvRoot.setText("🔑 Root: 请求授权中... (注意看 KernelSU 弹窗)");
+        tvRoot.setText("🔑 Root: 请求授权中... (注意看 Magisk 弹窗)");
         new Thread(() -> {
             boolean granted = RootUtil.requestRoot();
             handler.post(() -> {
                 if (granted) {
-                    tvRoot.setText("🔑 Root: 可用 ✅ (授权成功, 无需重启)");
+                    tvRoot.setText("🔑 Root: 可用 (授权成功, 无需重启)");
                     tvRoot.setTextColor(Color.parseColor("#188038"));
                     Toast("Root 授权成功!");
                 } else {
-                    tvRoot.setText("🔑 Root: 被拒绝 - 去 KernelSU 允许 com.aios.osbot 后重试");
+                    tvRoot.setText("🔑 Root: 被拒绝 - 需到 Magisk 授权 com.miui.voiceassist (本按钮只能触发本APP的授权)");
                     tvRoot.setTextColor(Color.parseColor("#D93025"));
                 }
                 checkStatus();
