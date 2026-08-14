@@ -14,8 +14,12 @@ public class BridgeStarter {
             return;
         }
         try {
-            Config.loadFrom(context.getApplicationContext());
-            HttpServer server = new HttpServer(context);
+            // Application.attach() 阶段 getApplicationContext() 可能为 null,
+            // 此时直接使用 attach 传入的 Context (即 Application 自身)
+            Context appCtx = context.getApplicationContext();
+            if (appCtx == null) appCtx = context;
+            Config.loadFrom(appCtx);
+            HttpServer server = new HttpServer(appCtx);
             server.start();
             Logger.d("Miclaw API Bridge started (v2.2 voiceassist)");
         } catch (Throwable t) {

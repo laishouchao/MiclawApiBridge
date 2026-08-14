@@ -45,7 +45,9 @@ public class HookEntry extends XposedModule {
                     if (ctx != null) {
                         // Hook handleInstruction 拦截AI响应
                         hookHandleInstruction(param.getDefaultClassLoader());
-                        BridgeStarter.start(ctx.getApplicationContext());
+                        // attach 阶段 getApplicationContext() 为 null,
+                        // 直接传 ctx (即 Application 自身), BridgeStarter 内部做容错
+                        BridgeStarter.start(ctx);
                         Logger.d("MiclawBridge v2.2 started (attach) - adapted for voiceassist");
                     }
                 } catch (Throwable t) {
@@ -71,7 +73,7 @@ public class HookEntry extends XposedModule {
             currentApp.setAccessible(true);
             Context ctx = (Context) currentApp.invoke(null);
             if (ctx != null) {
-                BridgeStarter.start(ctx.getApplicationContext());
+                BridgeStarter.start(ctx);
                 Logger.d("MiclawBridge v2.2 started (onPackageReady fallback)");
             }
         } catch (Throwable t) {
