@@ -203,19 +203,27 @@ public class AiClientHook {
                 Logger.d("AiClientHook: VoiceServiceRepository not found: " + e.getMessage());
             }
 
-            // 方式7: 暴力搜索 - 在所有 Service 中找任何有 sendQueryToMain 方法的对象
+            // 方式7: 暴力搜索 - 在所有 Service 中找任何有 sendQueryToMain 方法的对象 (深度10)
             try {
                 if (cachedActivityThread != null && cachedMServicesField != null) {
                     java.util.Map<android.os.IBinder, android.app.Service> services =
                         (java.util.Map<android.os.IBinder, android.app.Service>) cachedMServicesField.get(cachedActivityThread);
                     if (services != null) {
                         for (android.app.Service svc : services.values()) {
+                            Logger.d("AiClientHook: deep scan service: " + svc.getClass().getName());
                             Object methodClient = findObjectWithMethod(svc, "sendQueryToMain", 0, new java.util.IdentityHashMap<>());
                             if (methodClient != null) {
                                 capturedAiClient = methodClient;
                                 Logger.d("AiClientHook: FOUND sendQueryToMain on: " + methodClient.getClass().getName()
                                     + " in " + svc.getClass().getName());
                                 return methodClient;
+                            }
+                            // 也搜索 Application
+                            Object appClient = findObjectWithMethod(app, "sendQueryToMain", 0, new java.util.IdentityHashMap<>());
+                            if (appClient != null) {
+                                capturedAiClient = appClient;
+                                Logger.d("AiClientHook: FOUND sendQueryToMain in Application: " + appClient.getClass().getName());
+                                return appClient;
                             }
                         }
                     }
@@ -369,14 +377,21 @@ public class AiClientHook {
      * 递归搜索: 找到任何拥有指定方法名的对象 (不依赖类名)
      */
     private static Object findObjectWithMethod(Object obj, String methodName, int depth, java.util.IdentityHashMap<Object, Boolean> visited) {
-        if (obj == null || depth > 6 || visited.containsKey(obj)) return null;
+        if (obj == null || depth > 10 || visited.containsKey(obj)) return null;
         visited.put(obj, Boolean.TRUE);
 
         Class<?> cls = obj.getClass();
         try {
+            // 检查声明的方法和继承的方法
+            for (Method m : cls.getDeclaredMethods()) {
+                if (methodName.equals(m.getName())) {
+                    Logger.d("AiClientHook: found " + methodName + " on " + cls.getName() + " (depth=" + depth + ", visited=" + visited.size() + ")");
+                    return obj;
+                }
+            }
             for (Method m : cls.getMethods()) {
                 if (methodName.equals(m.getName())) {
-                    Logger.d("AiClientHook: found " + methodName + " on " + cls.getName() + " (depth=" + depth + ")");
+                    Logger.d("AiClientHook: found(inherited) " + methodName + " on " + cls.getName() + " (depth=" + depth + ", visited=" + visited.size() + ")");
                     return obj;
                 }
             }
@@ -386,7 +401,10 @@ public class AiClientHook {
         while (cls != null && cls != Object.class) {
             for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
                 Class<?> type = f.getType();
-                if (type.isPrimitive() || type == String.class || type == Class.class) continue;
+                if (type.isPrimitive() || type == String.class || type == Class.class
+                    || type == Integer.class || type == Long.class || type == Boolean.class
+                    || type == Float.class || type == Double.class || type == Byte.class
+                    || type == Short.class || type == Character.class) continue;
                 f.setAccessible(true);
                 try {
                     Object val = f.get(obj);
@@ -397,6 +415,9 @@ public class AiClientHook {
                 } catch (Exception ignored) {}
             }
             cls = cls.getSuperclass();
+        }
+        if (depth == 0) {
+            Logger.d("AiClientHook: method scan done, visited=" + visited.size() + " objects, no " + methodName + " found");
         }
         return null;
     }
