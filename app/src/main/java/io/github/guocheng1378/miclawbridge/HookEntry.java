@@ -2,18 +2,18 @@ package io.github.guocheng1378.miclawbridge;
 
 import android.content.Context;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 
 import io.github.libxposed.api.XposedModule;
 
 /**
- * LibXposed API 102 模块入口 (v2.2 适配 com.miui.voiceassist)
+ * LibXposed API 102 模块入口 (v3.0 适配 com.miui.voiceassist)
  *
- * 双保险启动:
- *  1. onPackageLoaded: hook Application.attach, attach 时立即启动 Bridge
- *  2. onPackageReady: 兜底, attach hook 可能错过时反射 ActivityThread.currentApplication 启动
- *  3. Hook handleInstruction() 拦截AI响应
- * 排除 system_server 和模块自身进程, 防止系统崩溃 / UI 闪退
+ * Channel 方案:
+ *  1. Hook com.xiaomi.ai.core.Channel 捕获通信通道实例
+ *  2. Hook NLP 响应类拦截 AI 回复
+ *  3. 通过 Channel 发送文本查询
  */
 public class HookEntry extends XposedModule {
 
@@ -43,12 +43,9 @@ public class HookEntry extends XposedModule {
                 try {
                     Context ctx = (Context) chain.getArg(0);
                     if (ctx != null) {
-                        // Hook handleInstruction 拦截AI响应
-                        hookHandleInstruction(param.getDefaultClassLoader());
-                        // attach 阶段 getApplicationContext() 为 null,
-                        // 直接传 ctx (即 Application 自身), BridgeStarter 内部做容错
+                        hookChannelCommunication(param.getDefaultClassLoader());
                         BridgeStarter.start(ctx);
-                        Logger.d("MiclawBridge v2.2 started (attach) - adapted for voiceassist");
+                        Logger.d("MiclawBridge v3.0 started (attach) - Channel approach");
                     }
                 } catch (Throwable t) {
                     Logger.e("HookEntry: start via attach failed", t);
@@ -65,16 +62,14 @@ public class HookEntry extends XposedModule {
     public void onPackageReady(PackageReadyParam param) {
         if (!TARGET_PACKAGE.equals(param.getPackageName())) return;
         try {
-            // Hook handleInstruction
-            hookHandleInstruction(param.getClassLoader());
-
+            hookChannelCommunication(param.getClassLoader());
             Class<?> atClass = Class.forName("android.app.ActivityThread", true, param.getClassLoader());
             Method currentApp = atClass.getDeclaredMethod("currentApplication");
             currentApp.setAccessible(true);
             Context ctx = (Context) currentApp.invoke(null);
             if (ctx != null) {
                 BridgeStarter.start(ctx);
-                Logger.d("MiclawBridge v2.2 started (onPackageReady fallback)");
+                Logger.d("MiclawBridge v3.0 started (onPackageReady fallback)");
             }
         } catch (Throwable t) {
             Logger.e("HookEntry: onPackageReady fallback failed", t);
@@ -82,158 +77,190 @@ public class HookEntry extends XposedModule {
     }
 
     /**
-     * Hook handleInstruction 拦截AI响应 + 构造函数捕获实例
-     * 沿继承链查找: AbsAiClient -> AiClient
+     * Hook Channel 通信层 + NLP 响应拦截
      */
-    private void hookHandleInstruction(ClassLoader classLoader) {
+    private void hookChannelCommunication(ClassLoader classLoader) {
+        // === 1. Channel 类: 捕获实例 + Hook 通信方法 ===
         try {
-            // === 核心: Hook 构造函数, AiClient 创建时立即捕获 ===
-            String[] aiClientClasses = {
-                "com.xiaomi.ai.conn.basic.AbsAiClient",
-                "com.xiaomi.ai.conn.basic.AiClient"
-            };
-            for (String className : aiClientClasses) {
-                try {
-                    Class<?> cls = Class.forName(className, false, classLoader);
-                    // Hook 构造函数
+            Class<?> channelClass = Class.forName("com.xiaomi.ai.core.Channel", false, classLoader);
+            logMethods(channelClass);
+            logConstructors(channelClass);
+
+            // Hook 所有构造函数, 捕获 Channel 实例
+            for (Constructor<?> ctor : channelClass.getDeclaredConstructors()) {
+                ctor.setAccessible(true);
+                hook(ctor).intercept(chain -> {
+                    Object result = chain.proceed();
                     try {
-                        java.lang.reflect.Constructor<?>[] ctors = cls.getDeclaredConstructors();
-                        for (java.lang.reflect.Constructor<?> ctor : ctors) {
-                            ctor.setAccessible(true);
-                            hook(ctor).intercept(chain -> {
-                                Object result = chain.proceed();
-                                try {
-                                    AiClientHook.setAiClient(chain.getThisObject());
-                                    Logger.d("HookEntry: AiClient CREATED: " + chain.getThisObject().getClass().getName());
-                                } catch (Throwable t) {
-                                    Logger.e("ctor hook error: " + t.getMessage());
-                                }
-                                return result;
-                            });
-                            Logger.d("HookEntry: hooked " + className + " constructor(" + ctor.getParameterCount() + " params)");
-                        }
+                        AiClientHook.setChannel(chain.getThisObject());
+                        Logger.d("HookEntry: Channel CREATED: " + chain.getThisObject().getClass().getName());
                     } catch (Throwable t) {
-                        Logger.e("HookEntry: ctor hook failed for " + className + ": " + t.getMessage());
+                        Logger.e("HookEntry: Channel ctor hook error: " + t.getMessage());
                     }
+                    return result;
+                });
+            }
+            Logger.d("HookEntry: hooked Channel constructors");
 
-                    // 列举所有方法 (诊断用)
-                    StringBuilder sb = new StringBuilder();
-                    for (Method m : cls.getDeclaredMethods()) {
-                        sb.append(m.getName()).append("(").append(m.getParameterCount()).append(") ");
-                    }
-                    Logger.d("HookEntry: " + className + " methods: " + sb.toString());
-
-                    // 列举 start() 方法参数类型
-                    for (Method m : cls.getDeclaredMethods()) {
-                        if ("start".equals(m.getName())) {
-                            StringBuilder paramInfo = new StringBuilder("start(");
-                            for (Class<?> p : m.getParameterTypes()) {
-                                paramInfo.append(p.getName()).append(", ");
+            // Hook 关键方法 (send/receive/event/instruction)
+            for (Method m : channelClass.getDeclaredMethods()) {
+                String name = m.getName().toLowerCase();
+                if (name.contains("send") || name.contains("event") || name.contains("instruction")
+                    || name.contains("receive") || name.contains("dispatch") || name.contains("handle")
+                    || name.contains("notify") || name.contains("callback") || name.contains("listener")) {
+                    m.setAccessible(true);
+                    hook(m).intercept(chain -> {
+                        try {
+                            StringBuilder args = new StringBuilder();
+                            for (int i = 0; i < chain.getArgs().length; i++) {
+                                Object arg = chain.getArg(i);
+                                String argStr = arg == null ? "null" : arg.getClass().getSimpleName() + ":" + truncate(arg.toString(), 100);
+                                args.append("[").append(i).append("=").append(argStr).append("] ");
                             }
-                            paramInfo.append(")");
-                            Logger.d("HookEntry: " + className + "." + paramInfo.toString());
-                        }
-                    }
-
-                    // 列举构造函数参数类型
-                    for (java.lang.reflect.Constructor<?> ctor : cls.getDeclaredConstructors()) {
-                        StringBuilder ctorInfo = new StringBuilder("ctor(");
-                        for (Class<?> p : ctor.getParameterTypes()) {
-                            ctorInfo.append(p.getName()).append(", ");
-                        }
-                        ctorInfo.append(")");
-                        Logger.d("HookEntry: " + className + " " + ctorInfo.toString());
-                    }
-
-                    // Hook handleInstruction
-                    for (Method m : cls.getDeclaredMethods()) {
-                        if ("handleInstruction".equals(m.getName())) {
-                            m.setAccessible(true);
-                            hook(m).intercept(chain -> {
-                                try {
-                                    AiClientHook.setAiClient(chain.getThisObject());
-                                    Object instruction = chain.getArg(0);
-                                    String text = extractTextFromInstruction(instruction);
-                                    if (text != null && !text.isEmpty()) {
-                                        AiClientHook.onResponse(text, false);
-                                    }
-                                } catch (Throwable t) {
-                                    Logger.e("handleInstruction hook error: " + t.getMessage());
-                                }
-                                return chain.proceed();
-                            });
-                            Logger.d("HookEntry: hooked " + className + ".handleInstruction");
-                        }
-                    }
-                } catch (ClassNotFoundException e) {
-                    Logger.d("HookEntry: class not found: " + className);
+                            Logger.d("HookEntry: Channel." + m.getName() + "(" + args + ")");
+                        } catch (Throwable ignored) {}
+                        return chain.proceed();
+                    });
                 }
             }
-
-            // 也尝试 Hook processInstruction
-            try {
-                Class<?> aiClass = Class.forName("com.xiaomi.ai.conn.basic.AbsAiClient", false, classLoader);
-                for (Method m : aiClass.getDeclaredMethods()) {
-                    String name = m.getName();
-                    if ("processInstruction".equals(name)) {
-                        m.setAccessible(true);
-                        hook(m).intercept(chain -> {
-                            try {
-                                AiClientHook.setAiClient(chain.getThisObject());
-                                Object instruction = chain.getArg(0);
-                                String text = extractTextFromInstruction(instruction);
-                                if (text != null && !text.isEmpty()) {
-                                    AiClientHook.onResponse(text, false);
-                                }
-                            } catch (Throwable t) {}
-                            return chain.proceed();
-                        });
-                        Logger.d("HookEntry: hooked processInstruction");
-                    }
-                }
-            } catch (Exception e) {
-                Logger.e("hookHandleInstruction extra: " + e.getMessage());
-            }
-
+        } catch (ClassNotFoundException e) {
+            Logger.d("HookEntry: Channel class not found");
         } catch (Throwable t) {
-            Logger.e("hookHandleInstruction failed: " + t.getMessage());
+            Logger.e("HookEntry: Channel hook failed: " + t.getMessage());
+        }
+
+        // === 2. ChannelListener 接口: 了解回调方法 ===
+        try {
+            Class<?> listenerClass = Class.forName("com.xiaomi.ai.core.ChannelListener", false, classLoader);
+            logMethods(listenerClass);
+        } catch (Exception e) {
+            Logger.d("HookEntry: ChannelListener not found");
+        }
+
+        // === 3. SpeechRecognizer$PostBack: 文本输入入口 ===
+        try {
+            Class<?> postBackClass = Class.forName("com.xiaomi.ai.api.SpeechRecognizer$PostBack", false, classLoader);
+            logMethods(postBackClass);
+            logConstructors(postBackClass);
+            for (Constructor<?> ctor : postBackClass.getDeclaredConstructors()) {
+                ctor.setAccessible(true);
+                hook(ctor).intercept(chain -> {
+                    Object result = chain.proceed();
+                    try {
+                        StringBuilder args = new StringBuilder();
+                        for (int i = 0; i < chain.getArgs().length; i++) {
+                            Object arg = chain.getArg(i);
+                            args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
+                        }
+                        Logger.d("HookEntry: PostBack CREATED: " + args);
+                        AiClientHook.onPostBackCreated(chain.getThisObject());
+                    } catch (Throwable ignored) {}
+                    return result;
+                });
+            }
+        } catch (Exception e) {
+            Logger.d("HookEntry: SpeechRecognizer$PostBack not found");
+        }
+
+        // === 4. NLP 响应类: 拦截 AI 回复 ===
+        String[] nlpClasses = {
+            "com.xiaomi.ai.api.Nlp$AnswerResult",
+            "com.xiaomi.ai.api.Nlp$StartStream",
+            "com.xiaomi.ai.api.Nlp$FinishStream",
+            "com.xiaomi.ai.api.Nlp$StartAnswer",
+            "com.xiaomi.ai.api.Nlp$FinishAnswer",
+            "com.xiaomi.ai.api.Nlp$LargeLanguageModelContent",
+            "com.xiaomi.ai.api.Nlp$ExecuteQuery",
+            "com.xiaomi.ai.api.Nlp$Request",
+        };
+        for (String className : nlpClasses) {
+            try {
+                Class<?> cls = Class.forName(className, false, classLoader);
+                logMethods(cls);
+                logConstructors(cls);
+                // Hook 构造函数, 拦截响应创建
+                for (Constructor<?> ctor : cls.getDeclaredConstructors()) {
+                    ctor.setAccessible(true);
+                    hook(ctor).intercept(chain -> {
+                        Object result = chain.proceed();
+                        try {
+                            StringBuilder args = new StringBuilder();
+                            for (int i = 0; i < chain.getArgs().length; i++) {
+                                Object arg = chain.getArg(i);
+                                args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
+                            }
+                            Logger.d("HookEntry: " + className + " CREATED: " + args);
+                            AiClientHook.onNlpEvent(className, chain.getThisObject());
+                        } catch (Throwable ignored) {}
+                        return result;
+                    });
+                }
+            } catch (ClassNotFoundException e) {
+                Logger.d("HookEntry: " + className + " not found");
+            }
+        }
+
+        // === 5. InstructionWrapper / EventWrapper ===
+        String[] wrapperClasses = {
+            "com.xiaomi.ai.core.InstructionWrapper",
+            "com.xiaomi.ai.core.EventWrapper",
+        };
+        for (String className : wrapperClasses) {
+            try {
+                Class<?> cls = Class.forName(className, false, classLoader);
+                logMethods(cls);
+                logConstructors(cls);
+                for (Constructor<?> ctor : cls.getDeclaredConstructors()) {
+                    ctor.setAccessible(true);
+                    hook(ctor).intercept(chain -> {
+                        Object result = chain.proceed();
+                        try {
+                            StringBuilder args = new StringBuilder();
+                            for (int i = 0; i < chain.getArgs().length; i++) {
+                                Object arg = chain.getArg(i);
+                                args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
+                            }
+                            Logger.d("HookEntry: " + className + " CREATED: " + args);
+                        } catch (Throwable ignored) {}
+                        return result;
+                    });
+                }
+            } catch (ClassNotFoundException e) {
+                Logger.d("HookEntry: " + className + " not found");
+            }
+        }
+
+        // === 6. 尝试 Hook AssistInteractionService (可能持有 Channel) ===
+        try {
+            Class<?> svcClass = Class.forName("com.xiaomi.voiceassistant.AssistInteractionService", false, classLoader);
+            logMethods(svcClass);
+        } catch (Exception e) {
+            Logger.d("HookEntry: AssistInteractionService not found");
         }
     }
 
-    /**
-     * 从 Instruction 对象中提取文本响应
-     */
-    private String extractTextFromInstruction(Object instruction) {
-        if (instruction == null) return null;
-        try {
-            Class<?> cls = instruction.getClass();
-
-            // 尝试 getText() / getReply() / getContent()
-            String[] getters = {"getText", "getReply", "getContent", "toString"};
-            for (String getter : getters) {
-                try {
-                    Method m = cls.getMethod(getter);
-                    m.setAccessible(true);
-                    Object val = m.invoke(instruction);
-                    if (val instanceof String && !((String) val).isEmpty()) {
-                        return (String) val;
-                    }
-                } catch (NoSuchMethodException ignored) {}
-            }
-
-            // 尝试直接读取字段
-            for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
-                f.setAccessible(true);
-                if (f.getType() == String.class) {
-                    String val = (String) f.get(instruction);
-                    if (val != null && val.length() > 5) {
-                        return val;
-                    }
-                }
-            }
-        } catch (Exception e) {
-            // ignore
+    private void logMethods(Class<?> cls) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(cls.getName()).append(" methods: ");
+        for (Method m : cls.getDeclaredMethods()) {
+            sb.append(m.getName()).append("(").append(m.getParameterCount()).append(") ");
         }
-        return null;
+        Logger.d("HookEntry: " + sb.toString());
+    }
+
+    private void logConstructors(Class<?> cls) {
+        for (Constructor<?> ctor : cls.getDeclaredConstructors()) {
+            StringBuilder sb = new StringBuilder("ctor(");
+            for (Class<?> p : ctor.getParameterTypes()) {
+                sb.append(p.getName()).append(", ");
+            }
+            sb.append(")");
+            Logger.d("HookEntry: " + cls.getName() + " " + sb.toString());
+        }
+    }
+
+    private String truncate(String s, int max) {
+        if (s == null) return "null";
+        return s.length() > max ? s.substring(0, max) + "..." : s;
     }
 }
