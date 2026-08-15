@@ -222,6 +222,76 @@ public class AiClientHook {
                 Logger.e("AiClientHook: method scan failed: " + e.getMessage());
             }
 
+            // 方式8: 通过反射创建 AiClient 实例 (最后手段)
+            try {
+                ClassLoader cl = getHostClassLoader();
+                String[] createClasses = {
+                    "com.xiaomi.ai.conn.basic.AiClient",
+                    "com.xiaomi.ai.conn.basic.AbsAiClient"
+                };
+                for (String cn : createClasses) {
+                    try {
+                        Class<?> cls = Class.forName(cn, false, cl);
+                        java.lang.reflect.Constructor<?>[] ctors = cls.getDeclaredConstructors();
+                        for (java.lang.reflect.Constructor<?> ctor : ctors) {
+                            ctor.setAccessible(true);
+                            Class<?>[] paramTypes = ctor.getParameterTypes();
+                            Object[] args = new Object[paramTypes.length];
+                            // 填充参数
+                            for (int i = 0; i < paramTypes.length; i++) {
+                                if (paramTypes[i] == Context.class || paramTypes[i] == android.content.Context.class) {
+                                    args[i] = app;
+                                } else if (paramTypes[i] == String.class) {
+                                    args[i] = "";
+                                } else if (paramTypes[i] == int.class) {
+                                    args[i] = 0;
+                                } else if (paramTypes[i] == boolean.class) {
+                                    args[i] = false;
+                                } else if (paramTypes[i] == long.class) {
+                                    args[i] = 0L;
+                                } else {
+                                    args[i] = null;
+                                }
+                            }
+                            try {
+                                Object instance = ctor.newInstance(args);
+                                if (instance != null) {
+                                    // 尝试调用 start()
+                                    try {
+                                        for (Method m : cls.getMethods()) {
+                                            if ("start".equals(m.getName()) && m.getParameterCount() <= 4) {
+                                                m.setAccessible(true);
+                                                Class<?>[] startParams = m.getParameterTypes();
+                                                Object[] startArgs = new Object[startParams.length];
+                                                for (int i = 0; i < startParams.length; i++) {
+                                                    if (startParams[i] == Context.class) startArgs[i] = app;
+                                                    else if (startParams[i] == String.class) startArgs[i] = "";
+                                                    else if (startParams[i] == int.class) startArgs[i] = 0;
+                                                    else if (startParams[i] == boolean.class) startArgs[i] = false;
+                                                    else startArgs[i] = null;
+                                                }
+                                                m.invoke(instance, startArgs);
+                                                Logger.d("AiClientHook: called start() on created instance");
+                                                break;
+                                            }
+                                        }
+                                    } catch (Exception startEx) {
+                                        Logger.d("AiClientHook: start() failed: " + startEx.getMessage());
+                                    }
+                                    capturedAiClient = instance;
+                                    Logger.d("AiClientHook: CREATED AiClient via reflection: " + instance.getClass().getName());
+                                    return instance;
+                                }
+                            } catch (Exception ctorEx) {
+                                Logger.d("AiClientHook: ctor failed (" + paramTypes.length + " params): " + ctorEx.getMessage());
+                            }
+                        }
+                    } catch (ClassNotFoundException ignored) {}
+                }
+            } catch (Exception e) {
+                Logger.e("AiClientHook: reflection create failed: " + e.getMessage());
+            }
+
             Logger.e("AiClientHook: no AiClient found anywhere");
         } catch (Exception e) {
             Logger.e("AiClientHook: getAiClient failed: " + e.getMessage());

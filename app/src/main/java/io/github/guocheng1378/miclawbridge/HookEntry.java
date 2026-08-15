@@ -123,6 +123,28 @@ public class HookEntry extends XposedModule {
                     }
                     Logger.d("HookEntry: " + className + " methods: " + sb.toString());
 
+                    // 列举 start() 方法参数类型
+                    for (Method m : cls.getDeclaredMethods()) {
+                        if ("start".equals(m.getName())) {
+                            StringBuilder paramInfo = new StringBuilder("start(");
+                            for (Class<?> p : m.getParameterTypes()) {
+                                paramInfo.append(p.getName()).append(", ");
+                            }
+                            paramInfo.append(")");
+                            Logger.d("HookEntry: " + className + "." + paramInfo.toString());
+                        }
+                    }
+
+                    // 列举构造函数参数类型
+                    for (java.lang.reflect.Constructor<?> ctor : cls.getDeclaredConstructors()) {
+                        StringBuilder ctorInfo = new StringBuilder("ctor(");
+                        for (Class<?> p : ctor.getParameterTypes()) {
+                            ctorInfo.append(p.getName()).append(", ");
+                        }
+                        ctorInfo.append(")");
+                        Logger.d("HookEntry: " + className + " " + ctorInfo.toString());
+                    }
+
                     // Hook handleInstruction
                     for (Method m : cls.getDeclaredMethods()) {
                         if ("handleInstruction".equals(m.getName())) {
