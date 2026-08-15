@@ -109,10 +109,11 @@ public class HookEntry extends XposedModule {
                     || name.contains("receive") || name.contains("dispatch") || name.contains("handle")
                     || name.contains("notify") || name.contains("callback") || name.contains("listener")) {
                     m.setAccessible(true);
+                    final int argCount = m.getParameterCount();
                     hook(m).intercept(chain -> {
                         try {
                             StringBuilder args = new StringBuilder();
-                            for (int i = 0; i < chain.getArgs().length; i++) {
+                            for (int i = 0; i < argCount; i++) {
                                 Object arg = chain.getArg(i);
                                 String argStr = arg == null ? "null" : arg.getClass().getSimpleName() + ":" + truncate(arg.toString(), 100);
                                 args.append("[").append(i).append("=").append(argStr).append("] ");
@@ -147,8 +148,9 @@ public class HookEntry extends XposedModule {
                 hook(ctor).intercept(chain -> {
                     Object result = chain.proceed();
                     try {
+                        int pc = ctor.getParameterCount();
                         StringBuilder args = new StringBuilder();
-                        for (int i = 0; i < chain.getArgs().length; i++) {
+                        for (int i = 0; i < pc; i++) {
                             Object arg = chain.getArg(i);
                             args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
                         }
@@ -181,16 +183,18 @@ public class HookEntry extends XposedModule {
                 // Hook 构造函数, 拦截响应创建
                 for (Constructor<?> ctor : cls.getDeclaredConstructors()) {
                     ctor.setAccessible(true);
+                    final int pc = ctor.getParameterCount();
+                    final String cn = className;
                     hook(ctor).intercept(chain -> {
                         Object result = chain.proceed();
                         try {
                             StringBuilder args = new StringBuilder();
-                            for (int i = 0; i < chain.getArgs().length; i++) {
+                            for (int i = 0; i < pc; i++) {
                                 Object arg = chain.getArg(i);
                                 args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
                             }
-                            Logger.d("HookEntry: " + className + " CREATED: " + args);
-                            AiClientHook.onNlpEvent(className, chain.getThisObject());
+                            Logger.d("HookEntry: " + cn + " CREATED: " + args);
+                            AiClientHook.onNlpEvent(cn, chain.getThisObject());
                         } catch (Throwable ignored) {}
                         return result;
                     });
@@ -212,15 +216,17 @@ public class HookEntry extends XposedModule {
                 logConstructors(cls);
                 for (Constructor<?> ctor : cls.getDeclaredConstructors()) {
                     ctor.setAccessible(true);
+                    final int pc = ctor.getParameterCount();
+                    final String cn = className;
                     hook(ctor).intercept(chain -> {
                         Object result = chain.proceed();
                         try {
                             StringBuilder args = new StringBuilder();
-                            for (int i = 0; i < chain.getArgs().length; i++) {
+                            for (int i = 0; i < pc; i++) {
                                 Object arg = chain.getArg(i);
                                 args.append("[").append(i).append("=").append(arg == null ? "null" : truncate(arg.toString(), 200)).append("] ");
                             }
-                            Logger.d("HookEntry: " + className + " CREATED: " + args);
+                            Logger.d("HookEntry: " + cn + " CREATED: " + args);
                         } catch (Throwable ignored) {}
                         return result;
                     });
