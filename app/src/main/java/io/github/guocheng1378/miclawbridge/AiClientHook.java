@@ -93,25 +93,30 @@ public class AiClientHook {
         }
     }
 
-    /** 检查 Channel 连接状态 */
+    /** 检查 Channel 连接状态 (方法名混淆, 按返回类型+参数匹配) */
     private static void checkConnectionState() {
         Object channel = capturedChannel;
         if (channel == null) return;
         try {
-            Method isConnected = channel.getClass().getMethod("isConnected");
-            boolean result = (boolean) isConnected.invoke(channel);
-            onConnectionState(result);
+            Method isConnected = findMethodBySignature(channel.getClass(), boolean.class, 0);
+            if (isConnected != null) {
+                isConnected.setAccessible(true);
+                boolean result = (boolean) isConnected.invoke(channel);
+                onConnectionState(result);
+            } else {
+                Logger.d("AiClientHook: checkConnectionState: no boolean() method found");
+            }
         } catch (Exception e) {
             Logger.d("AiClientHook: checkConnectionState failed: " + e.getMessage());
         }
     }
 
-    /** 通过反射检查 Channel 是否已连接 */
+    /** 通过反射检查 Channel 是否已连接 (方法名混淆, 按签名搜索) */
     private static boolean isChannelConnected() {
         Object channel = capturedChannel;
         if (channel == null) return false;
         try {
-            Method isConnected = findMethod(channel.getClass(), "isConnected", 0);
+            Method isConnected = findMethodBySignature(channel.getClass(), boolean.class, 0);
             if (isConnected != null) {
                 isConnected.setAccessible(true);
                 return (boolean) isConnected.invoke(channel);
@@ -663,48 +668,19 @@ public class AiClientHook {
     }
 
     /**
-     * 调用 Channel.postEvent(Event)
-     * postEvent 内部: event.toJsonString() -> new EventWrapper(event, json) -> WSChannel 发送
-     * 返回 false 的可能原因:
-     * 1. event.toJsonString() 抛出异常 (缺少 @Required 字段)
-     * 2. WebSocket 未连接 (f28821b == null 或 f28821b.e() == false)
-     * 3. 发送失败 (网络异常)
+     * 调用 Channel.postEvent(Event) — 方法名混淆, 按参数类型搜索
      */
     private static boolean callPostEvent(Object channel, Object event) {
         try {
             Class<?> cls = channel.getClass();
             while (cls != null) {
                 for (Method m : cls.getDeclaredMethods()) {
-                    if (m.getName().equals("postEvent") && m.getParameterCount() == 1) {
-                        Class<?> paramType = m.getParameterTypes()[0];
-                        // 匹配 Event 类型参数 (不匹配 EventWrapper/d 类型)
-                        if (paramType.getName().equals(CLS_EVENT)
-                            || paramType.isAssignableFrom(event.getClass())) {
-                            m.setAccessible(true);
-                            Object result = m.invoke(channel, event);
-                            Logger.d("AiClientHook: postEvent invoked, result=" + result
-                                + " type=" + (result != null ? result.getClass().getSimpleName() : "void"));
-                            if (result instanceof Boolean) {
-                                return (Boolean) result;
-                            }
-                            return true;
-                        }
-                    }
-                }
-                cls = cls.getSuperclass();
-            }
-
-            // 回退: 搜索任何接受 Event 类型参数的单参数方法
-            Logger.d("AiClientHook: postEvent(Event) by name not found, searching by param type...");
-            cls = channel.getClass();
-            while (cls != null) {
-                for (Method m : cls.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 1 && m.getReturnType() == boolean.class) {
+                    if (m.getParameterCount() == 1) {
                         Class<?> paramType = m.getParameterTypes()[0];
                         if (paramType.isAssignableFrom(event.getClass())) {
                             m.setAccessible(true);
                             Object result = m.invoke(channel, event);
-                            Logger.d("AiClientHook: found send method: " + m.getName()
+                            Logger.d("AiClientHook: postEvent via " + m.getName()
                                 + " result=" + result);
                             if (result instanceof Boolean) {
                                 return (Boolean) result;
@@ -716,7 +692,7 @@ public class AiClientHook {
                 cls = cls.getSuperclass();
             }
 
-            Logger.d("AiClientHook: no postEvent method found on " + channel.getClass().getName());
+            Logger.d("AiClientHook: no single-arg method accepting Event on " + channel.getClass().getName());
         } catch (Exception e) {
             Logger.e("AiClientHook: callPostEvent failed: " + e.getMessage());
         }
@@ -756,6 +732,20 @@ public class AiClientHook {
         while (c != null && c != Object.class) {
             for (Method m : c.getDeclaredMethods()) {
                 if (m.getName().equals(name) && m.getParameterCount() == paramCount) {
+                    return m;
+                }
+            }
+            c = c.getSuperclass();
+        }
+        return null;
+    }
+
+    /** 按返回类型和参数数量查找方法 (方法名可能混淆) */
+    private static Method findMethodBySignature(Class<?> cls, Class<?> returnType, int paramCount) {
+        Class<?> c = cls;
+        while (c != null && c != Object.class) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (m.getReturnType() == returnType && m.getParameterCount() == paramCount) {
                     return m;
                 }
             }

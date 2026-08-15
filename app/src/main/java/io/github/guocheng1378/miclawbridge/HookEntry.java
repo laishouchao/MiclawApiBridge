@@ -93,7 +93,7 @@ public class HookEntry extends XposedModule {
                     if (ctx != null) {
                         hookChannelCommunication(param.getDefaultClassLoader());
                         BridgeStarter.start(ctx);
-                        Logger.d("MiclawBridge v3.4 started (attach) - Channel+Request approach");
+                        Logger.d("MiclawBridge v3.5 started (attach) - Channel+Request approach");
                     }
                 } catch (Throwable t) {
                     Logger.e("HookEntry: start via attach failed", t);
@@ -117,7 +117,7 @@ public class HookEntry extends XposedModule {
             Context ctx = (Context) currentApp.invoke(null);
             if (ctx != null) {
                 BridgeStarter.start(ctx);
-                Logger.d("MiclawBridge v3.4 started (onPackageReady fallback)");
+                Logger.d("MiclawBridge v3.5 started (onPackageReady fallback)");
             }
         } catch (Throwable t) {
             Logger.e("HookEntry: onPackageReady fallback failed", t);
@@ -174,46 +174,48 @@ public class HookEntry extends XposedModule {
         }
         Logger.d("HookEntry: hooked Channel constructors");
 
-        // Hook postEvent(Event) - 捕获模板 + 日志诊断
+        // Hook postEvent(Event) - 捕获模板 + 日志诊断 (方法名混淆, 按参数类型匹配)
         for (Method m : channelClass.getDeclaredMethods()) {
             String methodName = m.getName();
             int paramCount = m.getParameterCount();
 
-            // postEvent(Event) - 主要发送方法
-            if (methodName.equals("postEvent") && paramCount == 1) {
+            // postEvent: 单参数, 参数类型为 Event
+            if (paramCount == 1) {
                 Class<?> paramType = m.getParameterTypes()[0];
-                m.setAccessible(true);
-
-                if (paramType.getName().equals(CLS_EVENT)) {
-                    hook(m).intercept(chain -> {
-                        Object event = chain.getArg(0);
-                        if (event != null) {
-                            AiClientHook.captureEventTemplate(event);
-                        }
-                        Object result = chain.proceed();
-                        try {
-                            Logger.d("HookEntry: postEvent(Event) result=" + result
-                                + " event=" + (event != null ? truncateStr(event.toString(), 300) : "null"));
-                        } catch (Throwable ignored) {}
-                        return result;
-                    });
-                    Logger.d("HookEntry: hooked postEvent(Event)");
-                }
+                try {
+                    Class<?> eventClass = Class.forName(CLS_EVENT, false, classLoader);
+                    if (paramType.isAssignableFrom(eventClass) || eventClass.isAssignableFrom(paramType)
+                        || paramType.getName().equals(CLS_EVENT)) {
+                        m.setAccessible(true);
+                        hook(m).intercept(chain -> {
+                            Object event = chain.getArg(0);
+                            if (event != null) {
+                                AiClientHook.captureEventTemplate(event);
+                            }
+                            Object result = chain.proceed();
+                            try {
+                                Logger.d("HookEntry: postEvent(" + m.getName() + ") result=" + result
+                                    + " event=" + (event != null ? truncateStr(event.toString(), 300) : "null"));
+                            } catch (Throwable ignored) {}
+                            return result;
+                        });
+                        Logger.d("HookEntry: hooked postEvent via " + m.getName());
+                    }
+                } catch (Exception ignored) {}
             }
 
-            // isConnected() - 跟踪连接状态
-            if (methodName.equals("isConnected") && paramCount == 0
-                && m.getReturnType() == boolean.class) {
+            // isConnected: 0参数, 返回 boolean
+            if (paramCount == 0 && m.getReturnType() == boolean.class) {
                 m.setAccessible(true);
                 hook(m).intercept(chain -> {
                     boolean connected = (boolean) chain.proceed();
                     AiClientHook.onConnectionState(connected);
                     return connected;
                 });
-                Logger.d("HookEntry: hooked isConnected()");
+                Logger.d("HookEntry: hooked isConnected via " + m.getName());
             }
 
-            // startConnect(boolean) - 跟踪连接尝试
+            // startConnect(boolean)
             if (methodName.equals("startConnect") && paramCount == 1) {
                 m.setAccessible(true);
                 hook(m).intercept(chain -> {
