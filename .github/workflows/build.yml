@@ -6,6 +6,8 @@ on:
     tags:
       - '*'      # 任意 tag 触发 Release (v2.0 / 16-2.0 均可)
   workflow_dispatch:
+  repository_dispatch:
+    types: [build]
 
 jobs:
   build:
