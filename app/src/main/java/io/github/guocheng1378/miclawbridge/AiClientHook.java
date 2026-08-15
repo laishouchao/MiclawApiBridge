@@ -2,6 +2,7 @@ package io.github.guocheng1378.miclawbridge;
 
 import android.content.Context;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
@@ -11,13 +12,21 @@ import org.json.JSONObject;
 import org.json.JSONArray;
 
 /**
- * v3.1 Channel 方案: 通过 com.xiaomi.ai.core.Channel 发送/接收消息
+ * v3.3 Channel 方案: 通过 com.xiaomi.ai.core.b (Channel) 发送/接收消息
  *
  * 核心机制:
- * 1. setChannel() - 从 Hook 捕获 Channel 实例
- * 2. chat() - 通过 Channel.postEvent(Nlp$ExecuteQuery) 发送文本查询
- * 3. onInstructionJson() - 从 InstructionWrapper JSON 解析 AI 回复文本
- * 4. onNlpMarker() - 跟踪 StartAnswer/FinishAnswer 等标记事件
+ * 1. setChannel() - 从 Hook 捕获 Channel 实例 (com.xiaomi.ai.core.b)
+ * 2. captureEventTemplate() - 从 postEvent 捕获真实 Event 模板
+ * 3. chat() - 构造 EventHeader + Nlp$ExecuteQuery, 包装进 Event, 调用 postEvent
+ * 4. onInstructionJson() - 从 InstructionWrapper (com.xiaomi.ai.core.e) JSON 解析回复
+ *
+ * 关键类映射 (ProGuard 混淆):
+ *   Channel = com.xiaomi.ai.core.b
+ *   ChannelListener = com.xiaomi.ai.core.c
+ *   InstructionWrapper = com.xiaomi.ai.core.e
+ *   Event = com.xiaomi.ai.api.common.Event (未混淆)
+ *   EventHeader = com.xiaomi.ai.api.common.EventHeader (未混淆)
+ *   ExecuteQuery = com.xiaomi.ai.api.Nlp$ExecuteQuery (未混淆)
  */
 public class AiClientHook {
 
@@ -25,8 +34,19 @@ public class AiClientHook {
         void onDelta(String text);
     }
 
+    // 混淆类名
+    private static final String CLS_CHANNEL = "com.xiaomi.ai.core.b";
+    private static final String CLS_EVENT = "com.xiaomi.ai.api.common.Event";
+    private static final String CLS_EVENT_HEADER = "com.xiaomi.ai.api.common.EventHeader";
+    private static final String CLS_MESSAGE = "com.xiaomi.ai.api.common.Message";
+    private static final String CLS_MESSAGE_HEADER = "com.xiaomi.ai.api.common.MessageHeader";
+    private static final String CLS_EXECUTE_QUERY = "com.xiaomi.ai.api.Nlp$ExecuteQuery";
+
     private static volatile Object capturedChannel = null;
     private static volatile Object capturedListener = null;
+    private static volatile Object eventTemplate = null;
+    private static volatile Object executeQueryTemplate = null;
+    private static volatile boolean templateDiagnosed = false;
 
     /** 由 HookEntry 调用: 捕获 Channel 实例 */
     public static void setChannel(Object channel) {
@@ -44,6 +64,77 @@ public class AiClientHook {
         }
     }
 
+    /** 由 HookEntry 调用: 捕获 Event 模板 */
+    public static void captureEventTemplate(Object event) {
+        if (event != null) {
+            eventTemplate = event;
+            if (!templateDiagnosed) {
+                templateDiagnosed = true;
+                diagnoseEvent(event);
+            }
+        }
+    }
+
+    /** 由 HookEntry 调用: 捕获 Nlp$ExecuteQuery 模板 */
+    public static void captureExecuteQuery(Object eq) {
+        if (eq != null) {
+            executeQueryTemplate = eq;
+            Logger.d("AiClientHook: captured ExecuteQuery template: " + eq.getClass().getName());
+        }
+    }
+
+    /** 诊断 Event 对象的字段值 */
+    private static void diagnoseEvent(Object event) {
+        try {
+            Logger.d("AiClientHook: === Event Template Diagnosis ===");
+            Logger.d("AiClientHook: Event class: " + event.getClass().getName());
+            Logger.d("AiClientHook: Event toString: " + truncate(event.toString(), 500));
+
+            // 遍历字段 (包括父类 Message)
+            Class<?> cls = event.getClass();
+            while (cls != null && cls != Object.class) {
+                for (Field f : cls.getDeclaredFields()) {
+                    if (f.getName().startsWith("access$") || f.getName().startsWith("$")) continue;
+                    f.setAccessible(true);
+                    Object val = f.get(event);
+                    String valStr = val != null ? truncate(val.toString(), 200) : "null";
+                    Logger.d("AiClientHook: " + cls.getSimpleName() + "." + f.getName()
+                        + " (" + f.getType().getSimpleName() + ") = " + valStr);
+
+                    if (val != null) {
+                        String fieldName = f.getName().toLowerCase();
+                        if (fieldName.contains("header") || fieldName.contains("payload")) {
+                            diagnoseSubObject(val, f.getName());
+                        }
+                    }
+                }
+                cls = cls.getSuperclass();
+            }
+            Logger.d("AiClientHook: === End Event Diagnosis ===");
+        } catch (Exception e) {
+            Logger.d("AiClientHook: diagnoseEvent error: " + e.getMessage());
+        }
+    }
+
+    private static void diagnoseSubObject(Object obj, String label) {
+        try {
+            Class<?> cls = obj.getClass();
+            while (cls != null && cls != Object.class) {
+                for (Field f : cls.getDeclaredFields()) {
+                    if (f.getName().startsWith("access$") || f.getName().startsWith("$")) continue;
+                    f.setAccessible(true);
+                    Object val = f.get(obj);
+                    String valStr = val != null ? truncate(val.toString(), 150) : "null";
+                    Logger.d("AiClientHook: " + label + "." + f.getName()
+                        + " (" + f.getType().getSimpleName() + ") = " + valStr);
+                }
+                cls = cls.getSuperclass();
+            }
+        } catch (Exception e) {
+            Logger.d("AiClientHook: diagnoseSubObject(" + label + ") error: " + e.getMessage());
+        }
+    }
+
     // === 响应同步 ===
     private static final Object lock = new Object();
     private static CountDownLatch responseLatch = null;
@@ -55,7 +146,6 @@ public class AiClientHook {
 
     /**
      * 处理 InstructionWrapper 的 JSON
-     * JSON 格式: {"header":{"name":"...","namespace":"...","dialog_id":"...","id":"..."},"payload":{...}}
      */
     public static void onInstructionJson(String json) {
         try {
@@ -67,34 +157,44 @@ public class AiClientHook {
             String namespace = header.optString("namespace", "");
             JSONObject payload = obj.optJSONObject("payload");
 
-            // 跳过非回复指令
             if ("System".equals(namespace) && ("Ack".equals(name) || "Abort".equals(name))) return;
-            if ("SpeechRecognizer".equals(namespace)) return; // ASR 结果, 非回复
+            if ("SpeechRecognizer".equals(namespace)) return;
             if ("Dialog".equals(namespace) && "Finish".equals(name)) {
-                // 对话结束
                 onEnd();
                 return;
             }
 
-            Logger.d("AiClientHook: Instruction: " + namespace + "." + name + " payload=" + (payload != null ? payload.toString() : "null"));
+            Logger.d("AiClientHook: Instruction: " + namespace + "." + name
+                + " payload=" + (payload != null ? truncate(payload.toString(), 300) : "null"));
 
-            // NLP 回复标记
             if ("Nlp".equals(namespace)) {
-                if ("StartAnswer".equals(name)) {
+                if ("StartAnswer".equals(name) || "StartStream".equals(name)) {
                     answerStarted = true;
                     return;
                 }
-                if ("FinishAnswer".equals(name)) {
+                if ("FinishAnswer".equals(name) || "FinishStream".equals(name)) {
                     onEnd();
                     return;
                 }
             }
 
-            // 从 payload 中提取文本
+            // SpeechSynthesizer: 实际回复文本通过 Speak/SpeakStream 传输
+            if ("SpeechSynthesizer".equals(namespace)) {
+                if ("StartSpeakStream".equals(name)) {
+                    answerStarted = true;
+                    return;
+                }
+                if ("FinishSpeakStream".equals(name) || "FinishSpeak".equals(name)) {
+                    onEnd();
+                    return;
+                }
+                // Speak 和 SpeakStream 的 payload 有 text 字段
+            }
+
             if (payload != null) {
                 String text = extractTextFromPayload(payload, name, namespace);
                 if (text != null && !text.isEmpty()) {
-                    Logger.d("AiClientHook: extracted text from " + namespace + "." + name + ": " + truncate(text, 200));
+                    Logger.d("AiClientHook: extracted text: " + truncate(text, 200));
                     onResponse(text, false);
                 }
             }
@@ -114,7 +214,7 @@ public class AiClientHook {
         } catch (Exception ignored) {}
     }
 
-    /** NLP 标记事件 (StartAnswer/FinishAnswer/StartStream/FinishStream) */
+    /** NLP 标记事件 */
     public static void onNlpMarker(String name) {
         Logger.d("AiClientHook: NLP marker: " + name);
         if ("StartAnswer".equals(name) || "StartStream".equals(name)) {
@@ -128,23 +228,21 @@ public class AiClientHook {
      * 从 payload JSON 中提取文本
      */
     private static String extractTextFromPayload(JSONObject payload, String instructionName, String namespace) {
-        // 直接检查 text 字段
         String text = payload.optString("text", null);
         if (text != null && !text.isEmpty()) return text;
 
-        // 检查 answer 字段
         text = payload.optString("answer", null);
         if (text != null && !text.isEmpty()) return text;
 
-        // 检查 content 字段
         text = payload.optString("content", null);
         if (text != null && !text.isEmpty()) return text;
 
-        // 检查 reply 字段
         text = payload.optString("reply", null);
         if (text != null && !text.isEmpty()) return text;
 
-        // 检查 data.tts.text 字段 (TTS 回复)
+        text = payload.optString("query", null);
+        if (text != null && !text.isEmpty()) return text;
+
         JSONObject data = payload.optJSONObject("data");
         if (data != null) {
             text = data.optString("text", null);
@@ -156,14 +254,12 @@ public class AiClientHook {
             }
         }
 
-        // 检查 tts.text 字段
         JSONObject tts = payload.optJSONObject("tts");
         if (tts != null) {
             text = tts.optString("text", null);
             if (text != null && !text.isEmpty()) return text;
         }
 
-        // 检查 results 数组 (可能用于流式回复)
         JSONArray results = payload.optJSONArray("results");
         if (results != null && results.length() > 0) {
             StringBuilder sb = new StringBuilder();
@@ -177,18 +273,12 @@ public class AiClientHook {
             if (sb.length() > 0) return sb.toString();
         }
 
-        // 检查流式字段
         text = payload.optString("delta", null);
         if (text != null && !text.isEmpty()) return text;
 
-        text = payload.optString("chunk", null);
-        if (text != null && !text.isEmpty()) return text;
-
-        // 递归检查 payload 中的所有字符串字段
         return findFirstLongString(payload);
     }
 
-    /** 递归查找 JSON 中第一个长度 > 5 的字符串值 */
     private static String findFirstLongString(JSONObject obj) {
         try {
             java.util.Iterator<String> keys = obj.keys();
@@ -223,13 +313,8 @@ public class AiClientHook {
     public static void onResponse(String text, boolean isStreaming) {
         synchronized (lock) {
             lastFrames++;
-            if (isStreaming) {
-                if (lastReply == null) lastReply = "";
-                lastReply += text;
-            } else {
-                if (lastReply == null) lastReply = "";
-                lastReply += text;
-            }
+            if (lastReply == null) lastReply = "";
+            lastReply += text;
             if (currentSink != null && text != null) {
                 currentSink.onDelta(text);
             }
@@ -270,7 +355,6 @@ public class AiClientHook {
         return AiClientHook.class.getClassLoader();
     }
 
-    /** 等待响应 (包装 InterruptedException) */
     private static boolean awaitResponse() {
         try {
             return responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
@@ -347,37 +431,40 @@ public class AiClientHook {
 
     /**
      * 通过 Channel.postEvent(Event) 发送文本查询
-     * Nlp$ExecuteQuery 是 payload 类, 不是 Event 子类
-     * 需要构造 Event 对象, 设置 header + payload, 再调用 postEvent
+     * 构造: EventHeader("Nlp", "ExecuteQuery") + Nlp.ExecuteQuery(text)
      */
     private static boolean sendViaPostEvent(String text) {
         try {
             Object channel = capturedChannel;
             ClassLoader cl = getHostClassLoader();
 
-            Class<?> eventClass = Class.forName("com.xiaomi.ai.api.common.Event", false, cl);
-            Logger.d("AiClientHook: Event class: " + eventClass.getName());
+            // 1. 创建 EventHeader
+            Object header = createEventHeader("Nlp", "ExecuteQuery", cl);
+            if (header == null) {
+                Logger.d("AiClientHook: cannot create EventHeader");
+                return false;
+            }
+            Logger.d("AiClientHook: created EventHeader: " + header.getClass().getName());
 
-            // 检查 Nlp$ExecuteQuery 是否是 Event 子类
-            Class<?> executeQueryClass = Class.forName("com.xiaomi.ai.api.Nlp$ExecuteQuery", false, cl);
-            Logger.d("AiClientHook: ExecuteQuery superclass: " + executeQueryClass.getSuperclass().getName());
-            if (eventClass.isAssignableFrom(executeQueryClass)) {
-                Logger.d("AiClientHook: ExecuteQuery IS an Event subclass");
+            // 2. 创建 Nlp.ExecuteQuery payload
+            Object payload = createExecuteQuery(text, cl);
+            if (payload == null) {
+                Logger.d("AiClientHook: cannot create ExecuteQuery, falling back to String");
+                payload = text;
             } else {
-                Logger.d("AiClientHook: ExecuteQuery is NOT an Event, need to wrap in Event");
+                Logger.d("AiClientHook: created ExecuteQuery: " + payload.getClass().getName());
             }
 
-            // 创建 Event 实例
-            Object event = createEventInstance(eventClass, cl);
+            // 3. 创建 Event 并设置 header + payload
+            Object event = createEvent(header, payload, cl);
             if (event == null) {
-                Logger.d("AiClientHook: cannot create Event instance");
+                Logger.d("AiClientHook: cannot create Event");
                 return false;
             }
 
-            // 设置 Event header + payload
-            setupEventPayload(event, eventClass, executeQueryClass, text, cl);
+            Logger.d("AiClientHook: Event ready, toString=" + truncate(event.toString(), 500));
 
-            // 调用 Channel.postEvent(event)
+            // 4. 调用 Channel.postEvent(event)
             return callPostEvent(channel, event);
 
         } catch (Exception e) {
@@ -386,219 +473,192 @@ public class AiClientHook {
         }
     }
 
-    /** 创建 Event 实例 */
-    private static Object createEventInstance(Class<?> eventClass, ClassLoader cl) {
-        // 尝试无参构造函数
-        for (java.lang.reflect.Constructor<?> ctor : eventClass.getDeclaredConstructors()) {
-            if (ctor.getParameterCount() == 0) {
-                ctor.setAccessible(true);
-                try {
-                    return ctor.newInstance();
-                } catch (Exception ignored) {}
-            }
-        }
-        // 尝试有参构造函数
-        for (java.lang.reflect.Constructor<?> ctor : eventClass.getDeclaredConstructors()) {
-            ctor.setAccessible(true);
-            Class<?>[] params = ctor.getParameterTypes();
-            Object[] args = new Object[params.length];
-            for (int i = 0; i < params.length; i++) {
-                args[i] = getDefaultValue(params[i]);
-            }
-            try {
-                return ctor.newInstance(args);
-            } catch (Exception ignored) {}
-        }
-        return null;
-    }
-
-    /** 设置 Event 的 header 和 payload */
-    private static void setupEventPayload(Object event, Class<?> eventClass, Class<?> payloadClass, String text, ClassLoader cl) {
+    /**
+     * 创建 EventHeader("Nlp", "ExecuteQuery")
+     * EventHeader 有构造函数: EventHeader(String namespace, String name)
+     */
+    private static Object createEventHeader(String namespace, String name, ClassLoader cl) {
         try {
-            String dialogId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+            Class<?> ehClass = Class.forName(CLS_EVENT_HEADER, false, cl);
+
+            // 使用两参数构造函数: EventHeader(String, String)
+            try {
+                Constructor<?> ctor = ehClass.getConstructor(String.class, String.class);
+                Object header = ctor.newInstance(namespace, name);
+
+                // 设置 id
+                String eventId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+                try {
+                    Method setId = ehClass.getMethod("setId", String.class);
+                    setId.invoke(header, eventId);
+                } catch (Exception ignored) {}
+
+                Logger.d("AiClientHook: EventHeader created: namespace=" + namespace + " name=" + name + " id=" + eventId);
+                return header;
+            } catch (Exception e) {
+                Logger.d("AiClientHook: EventHeader(String,String) ctor failed: " + e.getMessage());
+            }
+
+            // 回退: 无参构造 + setter
+            Object header = ehClass.newInstance();
+            callSetter(header, ehClass, "setName", name);
+            callSetter(header, ehClass, "setNamespace", namespace);
             String eventId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 32);
-
-            // 创建 payload 对象 (Nlp$ExecuteQuery)
-            Object payload = null;
-            for (java.lang.reflect.Constructor<?> ctor : payloadClass.getDeclaredConstructors()) {
-                if (ctor.getParameterCount() == 0) {
-                    ctor.setAccessible(true);
-                    payload = ctor.newInstance();
-                    break;
-                }
-            }
-            if (payload != null) {
-                try {
-                    Method setQuery = payloadClass.getDeclaredMethod("setQuery", String.class);
-                    setQuery.setAccessible(true);
-                    setQuery.invoke(payload, text);
-                } catch (Exception ignored) {}
-            }
-
-            // 尝试通过 setter 方法设置 header + payload
-            // Event 可能有 setHeader, setPayload, setQuery 等方法
-            String[] headerSetters = {"setHeader", "header"};
-            String[] payloadSetters = {"setPayload", "payload"};
-
-            // 尝试找到 Header 类
-            Class<?> headerClass = null;
-            try {
-                headerClass = Class.forName("com.xiaomi.ai.api.common.Header", false, cl);
-            } catch (Exception e2) {
-                try {
-                    headerClass = Class.forName("com.xiaomi.ai.core.Header", false, cl);
-                } catch (Exception e3) {
-                    // 在 Event 类的字段中查找 Header 类型
-                    for (Field f : eventClass.getDeclaredFields()) {
-                        if (f.getName().toLowerCase().contains("header")) {
-                            headerClass = f.getType();
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if (headerClass != null) {
-                Logger.d("AiClientHook: Header class: " + headerClass.getName());
-                Object header = createHeaderInstance(headerClass, "ExecuteQuery", "Nlp", dialogId, eventId, cl);
-                if (header != null) {
-                    // 设置 event.header = header
-                    setFieldOrSetter(event, eventClass, "header", header);
-                }
-            }
-
-            // 设置 payload
-            if (payload != null) {
-                setFieldOrSetter(event, eventClass, "payload", payload);
-            }
-
-            // 也尝试直接 setQuery
-            try {
-                Method setQuery = eventClass.getDeclaredMethod("setQuery", String.class);
-                setQuery.setAccessible(true);
-                setQuery.invoke(event, text);
-                Logger.d("AiClientHook: set query text directly on Event");
-            } catch (Exception ignored) {}
-
-            Logger.d("AiClientHook: Event setup done, toString=" + truncate(event.toString(), 200));
-        } catch (Exception e) {
-            Logger.d("AiClientHook: setupEventPayload failed: " + e.getMessage());
-        }
-    }
-
-    /** 创建 Header 实例 */
-    private static Object createHeaderInstance(Class<?> headerClass, String name, String namespace, String dialogId, String id, ClassLoader cl) {
-        try {
-            Object header = null;
-            for (java.lang.reflect.Constructor<?> ctor : headerClass.getDeclaredConstructors()) {
-                ctor.setAccessible(true);
-                if (ctor.getParameterCount() == 0) {
-                    header = ctor.newInstance();
-                    break;
-                }
-            }
-            if (header == null) return null;
-
-            // 设置字段
-            setFieldOrSetter(header, headerClass, "name", name);
-            setFieldOrSetter(header, headerClass, "namespace", namespace);
-            setFieldOrSetter(header, headerClass, "dialog_id", dialogId);
-            setFieldOrSetter(header, headerClass, "dialogId", dialogId);
-            setFieldOrSetter(header, headerClass, "id", id);
-
+            callSetter(header, ehClass, "setId", eventId);
             return header;
+
         } catch (Exception e) {
-            Logger.d("AiClientHook: createHeaderInstance failed: " + e.getMessage());
+            Logger.d("AiClientHook: createEventHeader failed: " + e.getMessage());
             return null;
         }
     }
 
-    /** 通过字段或 setter 设置值 */
-    private static void setFieldOrSetter(Object obj, Class<?> cls, String fieldName, Object value) {
-        // 尝试 setter 方法
-        String setterName = "set" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+    /**
+     * 创建 Nlp.ExecuteQuery(text)
+     * ExecuteQuery 有构造函数: ExecuteQuery(String query)
+     * 也有 setQuery(String) 方法
+     */
+    private static Object createExecuteQuery(String text, ClassLoader cl) {
         try {
-            Method setter = cls.getMethod(setterName, value.getClass());
-            setter.setAccessible(true);
-            setter.invoke(obj, value);
-            return;
-        } catch (Exception ignored) {}
+            Class<?> eqClass = Class.forName(CLS_EXECUTE_QUERY, false, cl);
 
-        // 尝试字段
-        Class<?> c = cls;
-        while (c != null && c != Object.class) {
+            // 尝试 String 构造函数: ExecuteQuery(String)
             try {
-                Field f = c.getDeclaredField(fieldName);
-                f.setAccessible(true);
-                f.set(obj, value);
-                return;
+                Constructor<?> ctor = eqClass.getConstructor(String.class);
+                Object eq = ctor.newInstance(text);
+                Logger.d("AiClientHook: ExecuteQuery created via String ctor");
+                return eq;
             } catch (Exception ignored) {}
-            c = c.getSuperclass();
+
+            // 回退: 无参构造 + setQuery
+            Object eq = eqClass.newInstance();
+            try {
+                Method setQuery = eqClass.getMethod("setQuery", String.class);
+                setQuery.invoke(eq, text);
+                Logger.d("AiClientHook: ExecuteQuery created via setQuery");
+                return eq;
+            } catch (Exception ignored) {}
+
+            // 最后回退: 直接设置字段
+            Field qField = findField(eqClass, "query");
+            if (qField != null) {
+                qField.setAccessible(true);
+                qField.set(eq, text);
+                Logger.d("AiClientHook: ExecuteQuery created via field");
+                return eq;
+            }
+
+            Logger.d("AiClientHook: cannot set query on ExecuteQuery");
+            return null;
+
+        } catch (ClassNotFoundException e) {
+            Logger.d("AiClientHook: ExecuteQuery class not found: " + CLS_EXECUTE_QUERY);
+            return null;
+        } catch (Exception e) {
+            Logger.d("AiClientHook: createExecuteQuery failed: " + e.getMessage());
+            return null;
         }
     }
 
-    /** 获取类型的默认值 */
-    private static Object getDefaultValue(Class<?> type) {
-        if (type == int.class || type == Integer.class) return 0;
-        if (type == long.class || type == Long.class) return 0L;
-        if (type == boolean.class || type == Boolean.class) return false;
-        if (type == String.class) return "";
-        return null;
+    /**
+     * 创建 Event 并设置 header + payload
+     * Event 有构造函数: Event(EventHeader, T payload)
+     * 也可以用 Event() + setHeader() + setPayload() (来自 Message)
+     */
+    private static Object createEvent(Object header, Object payload, ClassLoader cl) {
+        try {
+            Class<?> eventClass = Class.forName(CLS_EVENT, false, cl);
+            Class<?> ehClass = Class.forName(CLS_EVENT_HEADER, false, cl);
+
+            // 方式1: 两参数构造函数 Event(EventHeader, T)
+            for (Constructor<?> ctor : eventClass.getDeclaredConstructors()) {
+                if (ctor.getParameterCount() == 2) {
+                    ctor.setAccessible(true);
+                    try {
+                        return ctor.newInstance(header, payload);
+                    } catch (Exception e) {
+                        Logger.d("AiClientHook: Event(EventHeader, T) ctor failed: " + e.getMessage());
+                    }
+                }
+            }
+
+            // 方式2: 无参构造 + setHeader + setPayload
+            Logger.d("AiClientHook: falling back to Event() + setters");
+            Object event = eventClass.newInstance();
+
+            // setHeader 来自 Message 类, 参数类型可能是 MessageHeader (父类)
+            invokeSetter(event, "setHeader", header);
+            invokeSetter(event, "setPayload", payload);
+
+            return event;
+
+        } catch (Exception e) {
+            Logger.d("AiClientHook: createEvent failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** 调用 setter 方法 (搜索类层次结构) */
+    private static void invokeSetter(Object obj, String methodName, Object value) {
+        Class<?> cls = obj.getClass();
+        while (cls != null && cls != Object.class) {
+            for (Method m : cls.getDeclaredMethods()) {
+                if (m.getName().equals(methodName) && m.getParameterCount() == 1) {
+                    Class<?> paramType = m.getParameterTypes()[0];
+                    if (paramType.isAssignableFrom(value.getClass()) || paramType == Object.class) {
+                        m.setAccessible(true);
+                        try {
+                            m.invoke(obj, value);
+                            Logger.d("AiClientHook: " + methodName + " called successfully");
+                            return;
+                        } catch (Exception e) {
+                            Logger.d("AiClientHook: " + methodName + " invoke failed: " + e.getMessage());
+                        }
+                    }
+                }
+            }
+            cls = cls.getSuperclass();
+        }
+        Logger.d("AiClientHook: " + methodName + " not found");
+    }
+
+    /** 调用带 String 参数的 setter */
+    private static void callSetter(Object obj, Class<?> cls, String methodName, String value) {
+        try {
+            Method m = cls.getMethod(methodName, String.class);
+            m.setAccessible(true);
+            m.invoke(obj, value);
+        } catch (Exception ignored) {}
     }
 
     /**
      * 调用 Channel.postEvent(Event)
+     * postEvent 返回 boolean
      */
     private static boolean callPostEvent(Object channel, Object event) {
         try {
-            // 获取 postEvent 方法 (可能在实现类中, 不在抽象基类)
-            Class<?> channelClass = channel.getClass();
-            Method postEvent = null;
-
-            // 搜索 channel 实例的类及其父类
-            Class<?> cls = channelClass;
-            while (cls != null && postEvent == null) {
-                try {
-                    postEvent = cls.getDeclaredMethod("postEvent", event.getClass());
-                } catch (NoSuchMethodException e) {
-                    // 尝试用 Event 基类作为参数类型
-                    try {
-                        Class<?> eventBase = Class.forName("com.xiaomi.ai.api.common.Event", false, getHostClassLoader());
-                        postEvent = cls.getDeclaredMethod("postEvent", eventBase);
-                    } catch (Exception e2) {
-                        // 尝试所有 postEvent 方法
-                        for (Method m : cls.getDeclaredMethods()) {
-                            if (m.getName().equals("postEvent") && m.getParameterCount() == 1) {
-                                Class<?> paramType = m.getParameterTypes()[0];
-                                if (paramType.isAssignableFrom(event.getClass())) {
-                                    postEvent = m;
-                                    break;
-                                }
+            Class<?> cls = channel.getClass();
+            while (cls != null) {
+                for (Method m : cls.getDeclaredMethods()) {
+                    if (m.getName().equals("postEvent") && m.getParameterCount() == 1) {
+                        Class<?> paramType = m.getParameterTypes()[0];
+                        // 只匹配 Event 参数, 不匹配 d (EventWrapper) 参数
+                        if (paramType.getName().equals(CLS_EVENT)
+                            || paramType.isAssignableFrom(event.getClass())) {
+                            m.setAccessible(true);
+                            Object result = m.invoke(channel, event);
+                            Logger.d("AiClientHook: postEvent invoked, result=" + result
+                                + " type=" + (result != null ? result.getClass().getSimpleName() : "void"));
+                            if (result instanceof Boolean) {
+                                return (Boolean) result;
                             }
+                            return true;
                         }
                     }
                 }
                 cls = cls.getSuperclass();
             }
-
-            if (postEvent != null) {
-                postEvent.setAccessible(true);
-                Object result = postEvent.invoke(channel, event);
-                Logger.d("AiClientHook: postEvent() called, result=" + result);
-                return true;
-            } else {
-                // 最后尝试: 用 getMethod 搜索公开方法
-                try {
-                    Class<?> eventBase = Class.forName("com.xiaomi.ai.api.common.Event", false, getHostClassLoader());
-                    postEvent = channelClass.getMethod("postEvent", eventBase);
-                    postEvent.setAccessible(true);
-                    postEvent.invoke(channel, event);
-                    Logger.d("AiClientHook: postEvent() called via getMethod");
-                    return true;
-                } catch (Exception e) {
-                    Logger.d("AiClientHook: postEvent not found: " + e.getMessage());
-                }
-            }
+            Logger.d("AiClientHook: postEvent(Event) not found on " + channel.getClass().getName());
         } catch (Exception e) {
             Logger.e("AiClientHook: callPostEvent failed: " + e.getMessage());
         }
@@ -634,7 +694,7 @@ public class AiClientHook {
     }
 
     /**
-     * 搜索 Channel 实例 (从 ActivityThread 的 Service 中)
+     * 搜索 Channel 实例 (com.xiaomi.ai.core.b)
      */
     private static Object findChannelInstance() {
         try {
@@ -651,17 +711,16 @@ public class AiClientHook {
                 (java.util.Map<android.os.IBinder, android.app.Service>) mServicesField.get(at);
             if (services != null) {
                 for (android.app.Service svc : services.values()) {
-                    Object channel = findObjectByClassName(svc, "com.xiaomi.ai.core.Channel");
+                    Object channel = findObjectByClassName(svc, CLS_CHANNEL);
                     if (channel != null) return channel;
                 }
             }
 
-            // 也搜索 Application
             Method currentApp = atClass.getDeclaredMethod("currentApplication");
             currentApp.setAccessible(true);
             android.app.Application app = (android.app.Application) currentApp.invoke(null);
             if (app != null) {
-                return findObjectByClassName(app, "com.xiaomi.ai.core.Channel");
+                return findObjectByClassName(app, CLS_CHANNEL);
             }
         } catch (Exception e) {
             Logger.e("AiClientHook: findChannelInstance failed: " + e.getMessage());
@@ -679,7 +738,7 @@ public class AiClientHook {
 
         Class<?> cls = obj.getClass();
         while (cls != null) {
-            if (cls.getName().equals(targetClassName) || cls.getName().contains(targetClassName.substring(targetClassName.lastIndexOf('.') + 1))) {
+            if (cls.getName().equals(targetClassName)) {
                 return obj;
             }
             cls = cls.getSuperclass();
@@ -700,6 +759,18 @@ public class AiClientHook {
                 } catch (Exception ignored) {}
             }
             cls = cls.getSuperclass();
+        }
+        return null;
+    }
+
+    /** 查找字段 (递归父类) */
+    private static Field findField(Class<?> cls, String fieldName) {
+        Class<?> c = cls;
+        while (c != null && c != Object.class) {
+            try {
+                return c.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException ignored) {}
+            c = c.getSuperclass();
         }
         return null;
     }
