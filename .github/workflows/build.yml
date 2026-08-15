@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     tags:
-      - '*'      # 任意 tag 触发 Release (v2.0 / 16-2.0 均可)
+      - '*'
   workflow_dispatch:
   repository_dispatch:
     types: [build]
@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: write      # 允许创建 GitHub Release (修复 action-gh-release 403)
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
