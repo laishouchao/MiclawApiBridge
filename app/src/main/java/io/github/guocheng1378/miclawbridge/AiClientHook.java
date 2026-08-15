@@ -346,51 +346,36 @@ public class AiClientHook {
     }
 
     /**
-     * 通过 Channel.postEvent(Event) 发送 Nlp$ExecuteQuery
+     * 通过 Channel.postEvent(Event) 发送文本查询
+     * Nlp$ExecuteQuery 是 payload 类, 不是 Event 子类
+     * 需要构造 Event 对象, 设置 header + payload, 再调用 postEvent
      */
     private static boolean sendViaPostEvent(String text) {
         try {
             Object channel = capturedChannel;
             ClassLoader cl = getHostClassLoader();
 
-            // 创建 Nlp$ExecuteQuery 事件
-            Class<?> executeQueryClass = Class.forName("com.xiaomi.ai.api.Nlp$ExecuteQuery", false, cl);
-            Object event = null;
+            Class<?> eventClass = Class.forName("com.xiaomi.ai.api.common.Event", false, cl);
+            Logger.d("AiClientHook: Event class: " + eventClass.getName());
 
-            // 尝试无参构造函数
-            for (java.lang.reflect.Constructor<?> ctor : executeQueryClass.getDeclaredConstructors()) {
-                if (ctor.getParameterCount() == 0) {
-                    ctor.setAccessible(true);
-                    event = ctor.newInstance();
-                    break;
-                }
+            // 检查 Nlp$ExecuteQuery 是否是 Event 子类
+            Class<?> executeQueryClass = Class.forName("com.xiaomi.ai.api.Nlp$ExecuteQuery", false, cl);
+            Logger.d("AiClientHook: ExecuteQuery superclass: " + executeQueryClass.getSuperclass().getName());
+            if (eventClass.isAssignableFrom(executeQueryClass)) {
+                Logger.d("AiClientHook: ExecuteQuery IS an Event subclass");
+            } else {
+                Logger.d("AiClientHook: ExecuteQuery is NOT an Event, need to wrap in Event");
             }
+
+            // 创建 Event 实例
+            Object event = createEventInstance(eventClass, cl);
             if (event == null) {
-                // 尝试 String 参数构造函数
-                for (java.lang.reflect.Constructor<?> ctor : executeQueryClass.getDeclaredConstructors()) {
-                    if (ctor.getParameterCount() == 1) {
-                        ctor.setAccessible(true);
-                        try {
-                            event = ctor.newInstance(text);
-                            break;
-                        } catch (Exception ignored) {}
-                    }
-                }
-            }
-            if (event == null) {
-                Logger.d("AiClientHook: cannot create Nlp$ExecuteQuery instance");
+                Logger.d("AiClientHook: cannot create Event instance");
                 return false;
             }
 
-            // 设置查询文本
-            try {
-                Method setQuery = executeQueryClass.getDeclaredMethod("setQuery", String.class);
-                setQuery.setAccessible(true);
-                setQuery.invoke(event, text);
-                Logger.d("AiClientHook: set query text on ExecuteQuery");
-            } catch (Exception e) {
-                Logger.d("AiClientHook: setQuery failed: " + e.getMessage());
-            }
+            // 设置 Event header + payload
+            setupEventPayload(event, eventClass, executeQueryClass, text, cl);
 
             // 调用 Channel.postEvent(event)
             return callPostEvent(channel, event);
@@ -399,6 +384,166 @@ public class AiClientHook {
             Logger.e("AiClientHook: sendViaPostEvent failed: " + e.getMessage());
             return false;
         }
+    }
+
+    /** 创建 Event 实例 */
+    private static Object createEventInstance(Class<?> eventClass, ClassLoader cl) {
+        // 尝试无参构造函数
+        for (java.lang.reflect.Constructor<?> ctor : eventClass.getDeclaredConstructors()) {
+            if (ctor.getParameterCount() == 0) {
+                ctor.setAccessible(true);
+                try {
+                    return ctor.newInstance();
+                } catch (Exception ignored) {}
+            }
+        }
+        // 尝试有参构造函数
+        for (java.lang.reflect.Constructor<?> ctor : eventClass.getDeclaredConstructors()) {
+            ctor.setAccessible(true);
+            Class<?>[] params = ctor.getParameterTypes();
+            Object[] args = new Object[params.length];
+            for (int i = 0; i < params.length; i++) {
+                args[i] = getDefaultValue(params[i]);
+            }
+            try {
+                return ctor.newInstance(args);
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    /** 设置 Event 的 header 和 payload */
+    private static void setupEventPayload(Object event, Class<?> eventClass, Class<?> payloadClass, String text, ClassLoader cl) {
+        try {
+            String dialogId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+            String eventId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 32);
+
+            // 创建 payload 对象 (Nlp$ExecuteQuery)
+            Object payload = null;
+            for (java.lang.reflect.Constructor<?> ctor : payloadClass.getDeclaredConstructors()) {
+                if (ctor.getParameterCount() == 0) {
+                    ctor.setAccessible(true);
+                    payload = ctor.newInstance();
+                    break;
+                }
+            }
+            if (payload != null) {
+                try {
+                    Method setQuery = payloadClass.getDeclaredMethod("setQuery", String.class);
+                    setQuery.setAccessible(true);
+                    setQuery.invoke(payload, text);
+                } catch (Exception ignored) {}
+            }
+
+            // 尝试通过 setter 方法设置 header + payload
+            // Event 可能有 setHeader, setPayload, setQuery 等方法
+            String[] headerSetters = {"setHeader", "header"};
+            String[] payloadSetters = {"setPayload", "payload"};
+
+            // 尝试找到 Header 类
+            Class<?> headerClass = null;
+            try {
+                headerClass = Class.forName("com.xiaomi.ai.api.common.Header", false, cl);
+            } catch (Exception e2) {
+                try {
+                    headerClass = Class.forName("com.xiaomi.ai.core.Header", false, cl);
+                } catch (Exception e3) {
+                    // 在 Event 类的字段中查找 Header 类型
+                    for (Field f : eventClass.getDeclaredFields()) {
+                        if (f.getName().toLowerCase().contains("header")) {
+                            headerClass = f.getType();
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (headerClass != null) {
+                Logger.d("AiClientHook: Header class: " + headerClass.getName());
+                Object header = createHeaderInstance(headerClass, "ExecuteQuery", "Nlp", dialogId, eventId, cl);
+                if (header != null) {
+                    // 设置 event.header = header
+                    setFieldOrSetter(event, eventClass, "header", header);
+                }
+            }
+
+            // 设置 payload
+            if (payload != null) {
+                setFieldOrSetter(event, eventClass, "payload", payload);
+            }
+
+            // 也尝试直接 setQuery
+            try {
+                Method setQuery = eventClass.getDeclaredMethod("setQuery", String.class);
+                setQuery.setAccessible(true);
+                setQuery.invoke(event, text);
+                Logger.d("AiClientHook: set query text directly on Event");
+            } catch (Exception ignored) {}
+
+            Logger.d("AiClientHook: Event setup done, toString=" + truncate(event.toString(), 200));
+        } catch (Exception e) {
+            Logger.d("AiClientHook: setupEventPayload failed: " + e.getMessage());
+        }
+    }
+
+    /** 创建 Header 实例 */
+    private static Object createHeaderInstance(Class<?> headerClass, String name, String namespace, String dialogId, String id, ClassLoader cl) {
+        try {
+            Object header = null;
+            for (java.lang.reflect.Constructor<?> ctor : headerClass.getDeclaredConstructors()) {
+                ctor.setAccessible(true);
+                if (ctor.getParameterCount() == 0) {
+                    header = ctor.newInstance();
+                    break;
+                }
+            }
+            if (header == null) return null;
+
+            // 设置字段
+            setFieldOrSetter(header, headerClass, "name", name);
+            setFieldOrSetter(header, headerClass, "namespace", namespace);
+            setFieldOrSetter(header, headerClass, "dialog_id", dialogId);
+            setFieldOrSetter(header, headerClass, "dialogId", dialogId);
+            setFieldOrSetter(header, headerClass, "id", id);
+
+            return header;
+        } catch (Exception e) {
+            Logger.d("AiClientHook: createHeaderInstance failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** 通过字段或 setter 设置值 */
+    private static void setFieldOrSetter(Object obj, Class<?> cls, String fieldName, Object value) {
+        // 尝试 setter 方法
+        String setterName = "set" + Character.toUpperCase(fieldName.charAt(0)) + fieldName.substring(1);
+        try {
+            Method setter = cls.getMethod(setterName, value.getClass());
+            setter.setAccessible(true);
+            setter.invoke(obj, value);
+            return;
+        } catch (Exception ignored) {}
+
+        // 尝试字段
+        Class<?> c = cls;
+        while (c != null && c != Object.class) {
+            try {
+                Field f = c.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                f.set(obj, value);
+                return;
+            } catch (NoSuchFieldException ignored) {}
+            c = c.getSuperclass();
+        }
+    }
+
+    /** 获取类型的默认值 */
+    private static Object getDefaultValue(Class<?> type) {
+        if (type == int.class || type == Integer.class) return 0;
+        if (type == long.class || type == Long.class) return 0L;
+        if (type == boolean.class || type == Boolean.class) return false;
+        if (type == String.class) return "";
+        return null;
     }
 
     /**
