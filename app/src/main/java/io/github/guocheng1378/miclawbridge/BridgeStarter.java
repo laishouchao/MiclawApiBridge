@@ -44,7 +44,7 @@ public class BridgeStarter {
             Config.loadFrom(appCtx);
             HttpServer server = new HttpServer(appCtx);
             server.start();
-            Logger.d("Miclaw API Bridge started (v3.5 voiceassist-channel-request) build=25");
+            Logger.d("Miclaw API Bridge started (v3.6 voiceassist-channel-request) build=26");
         } catch (Throwable t) {
             Logger.e("Bridge start failed", t);
             started.set(false);

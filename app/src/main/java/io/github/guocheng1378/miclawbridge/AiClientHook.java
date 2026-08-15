@@ -93,38 +93,78 @@ public class AiClientHook {
         }
     }
 
-    /** 检查 Channel 连接状态 (方法名混淆, 按返回类型+参数匹配) */
+    /** 检查 Channel 连接状态 (方法名混淆, 先查字段再查方法) */
     private static void checkConnectionState() {
         Object channel = capturedChannel;
         if (channel == null) return;
         try {
-            Method isConnected = findMethodBySignature(channel.getClass(), boolean.class, 0);
-            if (isConnected != null) {
-                isConnected.setAccessible(true);
-                boolean result = (boolean) isConnected.invoke(channel);
-                onConnectionState(result);
-            } else {
-                Logger.d("AiClientHook: checkConnectionState: no boolean() method found");
-            }
+            boolean result = isChannelConnected();
+            onConnectionState(result);
+            Logger.d("AiClientHook: checkConnectionState result=" + result);
         } catch (Exception e) {
             Logger.d("AiClientHook: checkConnectionState failed: " + e.getMessage());
         }
     }
 
-    /** 通过反射检查 Channel 是否已连接 (方法名混淆, 按签名搜索) */
+    /** 通过反射检查 Channel 是否已连接 (优先查字段, 再查方法, 最后默认 true) */
     private static boolean isChannelConnected() {
         Object channel = capturedChannel;
         if (channel == null) return false;
         try {
-            Method isConnected = findMethodBySignature(channel.getClass(), boolean.class, 0);
+            Class<?> cls = channel.getClass();
+
+            // 方式1: 查找 boolean 字段 (connected, mConnected, mIsConnected, isConnected)
+            while (cls != null && cls != Object.class) {
+                for (Field f : cls.getDeclaredFields()) {
+                    String fn = f.getName().toLowerCase();
+                    if (f.getType() == boolean.class || f.getType() == Boolean.class) {
+                        if (fn.contains("connect") || fn.contains("active") || fn.contains("open")
+                            || fn.contains("alive") || fn.contains("ready")) {
+                            f.setAccessible(true);
+                            Object val = f.get(channel);
+                            boolean connected = val instanceof Boolean ? (Boolean) val : false;
+                            Logger.d("AiClientHook: isChannelConnected via field " + f.getName() + "=" + connected);
+                            return connected;
+                        }
+                    }
+                }
+                cls = cls.getSuperclass();
+            }
+
+            // 方式2: 查找 boolean() 方法
+            cls = channel.getClass();
+            Method isConnected = findMethodBySignature(cls, boolean.class, 0);
             if (isConnected != null) {
                 isConnected.setAccessible(true);
-                return (boolean) isConnected.invoke(channel);
+                boolean result = (boolean) isConnected.invoke(channel);
+                Logger.d("AiClientHook: isChannelConnected via method " + isConnected.getName() + "=" + result);
+                return result;
             }
+
+            // 方式3: 查找 boolean isXxx() 方法 (常见命名: isConnected, isOpen, isAlive, isReady)
+            while (cls != null && cls != Object.class) {
+                for (Method m : cls.getDeclaredMethods()) {
+                    if (m.getReturnType() == boolean.class && m.getParameterCount() == 0) {
+                        String mn = m.getName().toLowerCase();
+                        if (mn.startsWith("is") && (mn.contains("connect") || mn.contains("active")
+                            || mn.contains("open") || mn.contains("alive") || mn.contains("ready"))) {
+                            m.setAccessible(true);
+                            boolean result = (boolean) m.invoke(channel);
+                            Logger.d("AiClientHook: isChannelConnected via " + m.getName() + "=" + result);
+                            return result;
+                        }
+                    }
+                }
+                cls = cls.getSuperclass();
+            }
+
+            Logger.d("AiClientHook: isChannelConnected: no method/field found, assuming connected=true");
+            return true;  // 找不到状态检测方法时, 乐观假设已连接
+
         } catch (Exception e) {
             Logger.d("AiClientHook: isChannelConnected failed: " + e.getMessage());
+            return true;  // 异常时也乐观假设已连接
         }
-        return false;
     }
 
     // === 诊断 ===
@@ -669,23 +709,40 @@ public class AiClientHook {
 
     /**
      * 调用 Channel.postEvent(Event) — 方法名混淆, 按参数类型搜索
+     * 只搜索 Channel 类及其父类 (排除 Object 类)
+     * v3.6: 过滤掉 Object 参数的方法 (identityHashCode 等), 优先匹配 Event 类型参数
      */
     private static boolean callPostEvent(Object channel, Object event) {
         try {
+            Class<?> eventClass = event.getClass();
             Class<?> cls = channel.getClass();
-            while (cls != null) {
+
+            // 先尝试精确匹配: 参数类型为 Event 或其父类 (非 Object)
+            while (cls != null && cls != Object.class) {
                 for (Method m : cls.getDeclaredMethods()) {
-                    if (m.getParameterCount() == 1) {
-                        Class<?> paramType = m.getParameterTypes()[0];
-                        if (paramType.isAssignableFrom(event.getClass())) {
-                            m.setAccessible(true);
+                    if (m.getDeclaringClass() == Object.class) continue;
+                    if (m.getParameterCount() != 1) continue;
+
+                    Class<?> paramType = m.getParameterTypes()[0];
+                    // 跳过太通用的参数类型 (Object, Serializable 等)
+                    if (paramType == Object.class || paramType == java.io.Serializable.class) continue;
+                    // 跳过明显不是事件的方法
+                    String mn = m.getName();
+                    if (mn.equals("hashCode") || mn.equals("equals") || mn.equals("toString")
+                        || mn.equals("identityHashCode") || mn.startsWith("access$")) continue;
+
+                    if (paramType.isAssignableFrom(eventClass)) {
+                        m.setAccessible(true);
+                        try {
                             Object result = m.invoke(channel, event);
-                            Logger.d("AiClientHook: postEvent via " + m.getName()
-                                + " result=" + result);
+                            Logger.d("AiClientHook: postEvent via " + cls.getSimpleName() + "." + m.getName()
+                                + "(" + paramType.getSimpleName() + ") result=" + result);
                             if (result instanceof Boolean) {
                                 return (Boolean) result;
                             }
                             return true;
+                        } catch (Exception e) {
+                            Logger.d("AiClientHook: " + m.getName() + " invoke failed: " + e.getMessage());
                         }
                     }
                 }

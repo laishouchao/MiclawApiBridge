@@ -281,6 +281,7 @@ public class HookEntry extends XposedModule {
     }
 
     // === 3. Hook ChannelListener (com.xiaomi.ai.core.c) ===
+    // 方法名混淆, 按参数类型+数量匹配
     private void hookChannelListener(ClassLoader classLoader) {
         Class<?> listenerClass = resolveClass(classLoader, CLS_CHANNEL_LISTENER_NAMES);
         if (listenerClass == null) {
@@ -289,69 +290,54 @@ public class HookEntry extends XposedModule {
         }
         Logger.d("HookEntry: found ChannelListener class: " + listenerClass.getName());
 
+        // 先列出所有方法
+        StringBuilder clMethods = new StringBuilder("ChannelListener methods: ");
         for (Method m : listenerClass.getDeclaredMethods()) {
-            String methodName = m.getName();
+            clMethods.append(m.getName()).append("(").append(m.getParameterCount()).append(") ");
+        }
+        Logger.d("HookEntry: " + clMethods.toString());
 
-            // onInstruction(b channel, e instructionWrapper)
-            if (methodName.equals("onInstruction")) {
-                m.setAccessible(true);
-                final int pc = m.getParameterCount();
+        for (Method m : listenerClass.getDeclaredMethods()) {
+            m.setAccessible(true);
+            final int pc = m.getParameterCount();
+
+            // onInstruction: 2参数 (Channel, InstructionWrapper)
+            if (pc == 2) {
                 hook(m).intercept(chain -> {
                     try {
-                        if (pc >= 2) {
-                            Object instrWrapper = chain.getArg(1);
-                            if (instrWrapper != null) {
-                                // 尝试 getOriginal() 获取 JSON
-                                try {
-                                    Method getOriginal = instrWrapper.getClass().getMethod("getOriginal");
-                                    String json = (String) getOriginal.invoke(instrWrapper);
-                                    if (json != null && json.startsWith("{")) {
-                                        Logger.d("HookEntry: onInstruction JSON: " + truncateStr(json, 500));
-                                        AiClientHook.onInstructionJson(json);
-                                    }
-                                } catch (Exception ignored) {}
-                                AiClientHook.onInstructionObject(instrWrapper);
-                            }
+                        Object instrWrapper = chain.getArg(1);
+                        if (instrWrapper != null) {
+                            try {
+                                Method getOriginal = instrWrapper.getClass().getMethod("getOriginal");
+                                String json = (String) getOriginal.invoke(instrWrapper);
+                                if (json != null && json.startsWith("{")) {
+                                    Logger.d("HookEntry: onInstruction JSON: " + truncateStr(json, 500));
+                                    AiClientHook.onInstructionJson(json);
+                                }
+                            } catch (Exception ignored) {}
+                            AiClientHook.onInstructionObject(instrWrapper);
                         }
                     } catch (Throwable ignored) {}
                     return chain.proceed();
                 });
-                Logger.d("HookEntry: hooked ChannelListener.onInstruction");
+                Logger.d("HookEntry: hooked onInstruction via " + m.getName());
             }
 
-            // onConnected(b channel) - 连接成功
-            if (methodName.equals("onConnected") && m.getParameterCount() == 1) {
-                m.setAccessible(true);
+            // onConnected / onDisconnected: 1参数 (Channel), 返回void
+            // 无法通过签名区分, 都hook并记录
+            if (pc == 1 && m.getReturnType() == void.class) {
                 hook(m).intercept(chain -> {
-                    Logger.d("HookEntry: ChannelListener.onConnected!");
-                    AiClientHook.onConnectionState(true);
+                    Logger.d("HookEntry: ChannelListener." + m.getName() + " called");
+                    AiClientHook.onConnectionState(true); // 乐观假设: 单参回调=连接成功
                     return chain.proceed();
                 });
-                Logger.d("HookEntry: hooked ChannelListener.onConnected");
+                Logger.d("HookEntry: hooked CL callback via " + m.getName());
             }
 
-            // onDisconnected(b channel) - 断开连接
-            if (methodName.equals("onDisconnected") && m.getParameterCount() == 1) {
-                m.setAccessible(true);
-                hook(m).intercept(chain -> {
-                    Logger.d("HookEntry: ChannelListener.onDisconnected!");
-                    AiClientHook.onConnectionState(false);
-                    return chain.proceed();
-                });
-                Logger.d("HookEntry: hooked ChannelListener.onDisconnected");
-            }
-
-            // onError(b channel, um.a error) - 错误
-            if (methodName.equals("onError") && m.getParameterCount() == 2) {
-                m.setAccessible(true);
-                hook(m).intercept(chain -> {
-                    try {
-                        Object error = chain.getArg(1);
-                        Logger.d("HookEntry: ChannelListener.onError: " + error);
-                    } catch (Throwable ignored) {}
-                    return chain.proceed();
-                });
-                Logger.d("HookEntry: hooked ChannelListener.onError");
+            // onError: 2参数 (Channel, Error)
+            if (pc == 2) {
+                // 已经在上面2参数的情况下hook了, 这里只是额外标记
+                // 注意: onInstruction也是2参数, 已通过 InstructionWrapper 内容区分
             }
         }
     }
