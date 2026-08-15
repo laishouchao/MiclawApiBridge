@@ -270,6 +270,16 @@ public class AiClientHook {
         return AiClientHook.class.getClassLoader();
     }
 
+    /** 等待响应 (包装 InterruptedException) */
+    private static boolean awaitResponse() {
+        try {
+            return responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
     /**
      * 发送文本查询并等待响应
      */
@@ -290,7 +300,7 @@ public class AiClientHook {
             boolean sent = sendViaPostEvent(text);
             if (sent) {
                 Logger.d("AiClientHook: sent via postEvent, waiting response...");
-                boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+                boolean completed = awaitResponse();
                 synchronized (lock) {
                     String reply = lastReply != null ? lastReply : "";
                     String error = lastError;
@@ -312,7 +322,7 @@ public class AiClientHook {
                 boolean sent = sendViaPostEvent(text);
                 if (sent) {
                     Logger.d("AiClientHook: sent via postEvent (searched), waiting...");
-                    boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+                    boolean completed = awaitResponse();
                     synchronized (lock) {
                         String reply = lastReply != null ? lastReply : "";
                         String error = lastError;
@@ -326,7 +336,7 @@ public class AiClientHook {
         // 方式3: Intent 回退
         Logger.d("AiClientHook: Channel send failed, trying Intent fallback");
         trySendViaIntent(text);
-        boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+        boolean completed = awaitResponse();
         synchronized (lock) {
             String reply = lastReply != null ? lastReply : "";
             String error = lastError;
