@@ -82,28 +82,54 @@ public class HookEntry extends XposedModule {
     }
 
     /**
-     * Hook handleInstruction 拦截AI响应
+     * Hook handleInstruction 拦截AI响应 + 构造函数捕获实例
      * 沿继承链查找: AbsAiClient -> AiClient
      */
     private void hookHandleInstruction(ClassLoader classLoader) {
         try {
-            // 尝试 Hook AbsAiClient.handleInstruction
-            String[] classNames = {
+            // === 核心: Hook 构造函数, AiClient 创建时立即捕获 ===
+            String[] aiClientClasses = {
                 "com.xiaomi.ai.conn.basic.AbsAiClient",
                 "com.xiaomi.ai.conn.basic.AiClient"
             };
-
-            for (String className : classNames) {
+            for (String className : aiClientClasses) {
                 try {
                     Class<?> cls = Class.forName(className, false, classLoader);
+                    // Hook 构造函数
+                    try {
+                        java.lang.reflect.Constructor<?>[] ctors = cls.getDeclaredConstructors();
+                        for (java.lang.reflect.Constructor<?> ctor : ctors) {
+                            ctor.setAccessible(true);
+                            hook(ctor).intercept(chain -> {
+                                Object result = chain.proceed();
+                                try {
+                                    AiClientHook.setAiClient(chain.getThisObject());
+                                    Logger.d("HookEntry: AiClient CREATED: " + chain.getThisObject().getClass().getName());
+                                } catch (Throwable t) {
+                                    Logger.e("ctor hook error: " + t.getMessage());
+                                }
+                                return result;
+                            });
+                            Logger.d("HookEntry: hooked " + className + " constructor(" + ctor.getParameterCount() + " params)");
+                        }
+                    } catch (Throwable t) {
+                        Logger.e("HookEntry: ctor hook failed for " + className + ": " + t.getMessage());
+                    }
+
+                    // 列举所有方法 (诊断用)
+                    StringBuilder sb = new StringBuilder();
+                    for (Method m : cls.getDeclaredMethods()) {
+                        sb.append(m.getName()).append("(").append(m.getParameterCount()).append(") ");
+                    }
+                    Logger.d("HookEntry: " + className + " methods: " + sb.toString());
+
+                    // Hook handleInstruction
                     for (Method m : cls.getDeclaredMethods()) {
                         if ("handleInstruction".equals(m.getName())) {
                             m.setAccessible(true);
                             hook(m).intercept(chain -> {
                                 try {
-                                    // 捕获 AiClient 实例 (this) 用于后续发送查询
                                     AiClientHook.setAiClient(chain.getThisObject());
-                                    // 尝试从参数中提取响应文本
                                     Object instruction = chain.getArg(0);
                                     String text = extractTextFromInstruction(instruction);
                                     if (text != null && !text.isEmpty()) {
@@ -118,11 +144,11 @@ public class HookEntry extends XposedModule {
                         }
                     }
                 } catch (ClassNotFoundException e) {
-                    // 继续尝试下一个
+                    Logger.d("HookEntry: class not found: " + className);
                 }
             }
 
-            // 也尝试 Hook onResponse / processInstruction 相关方法
+            // 也尝试 Hook processInstruction
             try {
                 Class<?> aiClass = Class.forName("com.xiaomi.ai.conn.basic.AbsAiClient", false, classLoader);
                 for (Method m : aiClass.getDeclaredMethods()) {

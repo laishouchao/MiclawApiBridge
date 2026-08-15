@@ -99,27 +99,29 @@ public class AiClientHook {
 
             // 方式2: 从 ActivityThread.mServices 中找 VoiceService, 再提取 AiClient
             try {
-                java.lang.reflect.Field mServicesField = atClass.getDeclaredField("mServices");
-                mServicesField.setAccessible(true);
-                // 获取当前 ActivityThread 实例
-                Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
-                currentAt.setAccessible(true);
-                Object activityThread = currentAt.invoke(null);
-                if (activityThread != null) {
+                if (cachedMServicesField == null) {
+                    cachedMServicesField = atClass.getDeclaredField("mServices");
+                    cachedMServicesField.setAccessible(true);
+                }
+                if (cachedActivityThread == null) {
+                    Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
+                    currentAt.setAccessible(true);
+                    cachedActivityThread = currentAt.invoke(null);
+                }
+                if (cachedActivityThread != null) {
                     @SuppressWarnings("unchecked")
                     java.util.Map<android.os.IBinder, android.app.Service> services =
-                        (java.util.Map<android.os.IBinder, android.app.Service>) mServicesField.get(activityThread);
+                        (java.util.Map<android.os.IBinder, android.app.Service>) cachedMServicesField.get(cachedActivityThread);
                     if (services != null) {
                         for (android.app.Service svc : services.values()) {
-                            if (svc.getClass().getName().contains("VoiceService") ||
-                                svc.getClass().getName().contains("voiceassist")) {
-                                Logger.d("AiClientHook: found service: " + svc.getClass().getName());
-                                Object client = findAiClientInObject(svc);
-                                if (client != null) {
-                                    capturedAiClient = client;
-                                    Logger.d("AiClientHook: found AiClient in VoiceService: " + client.getClass().getName());
-                                    return client;
-                                }
+                            String svcName = svc.getClass().getName();
+                            Logger.d("AiClientHook: service: " + svcName);
+                            // 搜索所有 service, 不仅限于名字包含 VoiceService 的
+                            Object client = findAiClientInObject(svc);
+                            if (client != null) {
+                                capturedAiClient = client;
+                                Logger.d("AiClientHook: found AiClient in " + svcName + ": " + client.getClass().getName());
+                                return client;
                             }
                         }
                     }
@@ -139,7 +141,8 @@ public class AiClientHook {
             // 方式4: 尝试 getInstance() 静态方法
             String[] classNames = {
                 "com.xiaomi.ai.conn.basic.AiClient",
-                "com.xiaomi.ai.conn.basic.AbsAiClient"
+                "com.xiaomi.ai.conn.basic.AbsAiClient",
+                "com.xiaomi.ai.conn.basic.AiConnection"
             };
             for (String className : classNames) {
                 try {
@@ -159,6 +162,66 @@ public class AiClientHook {
                 } catch (ClassNotFoundException ignored) {}
             }
 
+            // 方式5: 通过 Application 的静态字段搜索
+            for (java.lang.reflect.Field f : app.getClass().getDeclaredFields()) {
+                if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                    f.setAccessible(true);
+                    try {
+                        Object val = f.get(app);
+                        if (val != null && isAiClientClass(val.getClass())) {
+                            capturedAiClient = val;
+                            Logger.d("AiClientHook: found in static field " + f.getName());
+                            return val;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            // 方式6: 从 VoiceServiceRepository 中找 (可能持有 AiClient)
+            try {
+                Class<?> repoClass = Class.forName(
+                    "com.miui.voiceassist.data.repositories.VoiceServiceRepository", false, getHostClassLoader());
+                for (java.lang.reflect.Field f : repoClass.getDeclaredFields()) {
+                    if (java.lang.reflect.Modifier.isStatic(f.getModifiers())) {
+                        f.setAccessible(true);
+                        try {
+                            Object val = f.get(null);
+                            if (val != null) {
+                                Object nested = findAiClientInObject(val);
+                                if (nested != null) {
+                                    capturedAiClient = nested;
+                                    Logger.d("AiClientHook: found in VoiceServiceRepository." + f.getName());
+                                    return nested;
+                                }
+                            }
+                        } catch (Exception ignored) {}
+                    }
+                }
+            } catch (Exception e) {
+                Logger.d("AiClientHook: VoiceServiceRepository not found: " + e.getMessage());
+            }
+
+            // 方式7: 暴力搜索 - 在所有 Service 中找任何有 sendQueryToMain 方法的对象
+            try {
+                if (cachedActivityThread != null && cachedMServicesField != null) {
+                    java.util.Map<android.os.IBinder, android.app.Service> services =
+                        (java.util.Map<android.os.IBinder, android.app.Service>) cachedMServicesField.get(cachedActivityThread);
+                    if (services != null) {
+                        for (android.app.Service svc : services.values()) {
+                            Object client = findObjectWithMethod(svc, "sendQueryToMain", 0, new java.util.IdentityHashMap<>());
+                            if (client != null) {
+                                capturedAiClient = client;
+                                Logger.d("AiClientHook: FOUND sendQueryToMain on: " + client.getClass().getName()
+                                    + " in " + svc.getClass().getName());
+                                return client;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Logger.e("AiClientHook: method scan failed: " + e.getMessage());
+            }
+
             Logger.e("AiClientHook: no AiClient found anywhere");
         } catch (Exception e) {
             Logger.e("AiClientHook: getAiClient failed: " + e.getMessage());
@@ -175,7 +238,7 @@ public class AiClientHook {
     }
 
     private static Object findAiClientInObject(Object obj, int depth, java.util.IdentityHashMap<Object, Boolean> visited) {
-        if (obj == null || depth > 4 || visited.containsKey(obj)) return null;
+        if (obj == null || depth > 6 || visited.containsKey(obj)) return null;
         visited.put(obj, Boolean.TRUE);
 
         Class<?> cls = obj.getClass();
@@ -195,7 +258,7 @@ public class AiClientHook {
                         return val;
                     }
                     // 递归搜索复杂对象 (最多4层)
-                    if (depth < 4 && !type.isPrimitive()) {
+                    if (depth < 6 && !type.isPrimitive()) {
                         Object nested = findAiClientInObject(val, depth + 1, visited);
                         if (nested != null) return nested;
                     }
@@ -207,12 +270,63 @@ public class AiClientHook {
     }
 
     private static boolean isAiClientClass(Class<?> cls) {
-        while (cls != null) {
-            String name = cls.getName();
+        Class<?> c = cls;
+        while (c != null) {
+            String name = c.getName();
+            // 名称匹配
             if (name.contains("AbsAiClient") || name.equals("com.xiaomi.ai.conn.basic.AiClient")) return true;
+            // 接口/父类名称匹配
+            for (Class<?> iface : c.getInterfaces()) {
+                if (iface.getName().contains("AiClient") || iface.getName().contains("IAiClient")) return true;
+            }
+            c = c.getSuperclass();
+        }
+        // 方法匹配: 如果一个类有 sendQueryToMain + handleInstruction, 很可能就是 AiClient
+        try {
+            boolean hasSend = false, hasHandle = false;
+            for (Method m : cls.getMethods()) {
+                if ("sendQueryToMain".equals(m.getName())) hasSend = true;
+                if ("handleInstruction".equals(m.getName())) hasHandle = true;
+            }
+            if (hasSend && hasHandle) return true;
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /**
+     * 递归搜索: 找到任何拥有指定方法名的对象 (不依赖类名)
+     */
+    private static Object findObjectWithMethod(Object obj, String methodName, int depth, java.util.IdentityHashMap<Object, Boolean> visited) {
+        if (obj == null || depth > 6 || visited.containsKey(obj)) return null;
+        visited.put(obj, Boolean.TRUE);
+
+        Class<?> cls = obj.getClass();
+        try {
+            for (Method m : cls.getMethods()) {
+                if (methodName.equals(m.getName())) {
+                    Logger.d("AiClientHook: found " + methodName + " on " + cls.getName() + " (depth=" + depth + ")");
+                    return obj;
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        // 递归搜索字段
+        while (cls != null && cls != Object.class) {
+            for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
+                Class<?> type = f.getType();
+                if (type.isPrimitive() || type == String.class || type == Class.class) continue;
+                f.setAccessible(true);
+                try {
+                    Object val = f.get(obj);
+                    if (val != null && !visited.containsKey(val)) {
+                        Object found = findObjectWithMethod(val, methodName, depth + 1, visited);
+                        if (found != null) return found;
+                    }
+                } catch (Exception ignored) {}
+            }
             cls = cls.getSuperclass();
         }
-        return false;
+        return null;
     }
 
     /**
@@ -236,6 +350,10 @@ public class AiClientHook {
     }
 
     private static ClassLoader hostClassLoader = null;
+
+    // 缓存 ActivityThread / mServices 引用 (避免重复反射)
+    private static Object cachedActivityThread = null;
+    private static java.lang.reflect.Field cachedMServicesField = null;
 
     /**
      * 发送文本查询并等待响应
