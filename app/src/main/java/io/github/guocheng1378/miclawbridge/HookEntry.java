@@ -102,7 +102,7 @@ public class HookEntry extends XposedModule {
                             hook(m).intercept(chain -> {
                                 try {
                                     // 捕获 AiClient 实例 (this) 用于后续发送查询
-                                    AiClientHook.setAiClient(chain.getThis());
+                                    AiClientHook.setAiClient(chain.getThisObject());
                                     // 尝试从参数中提取响应文本
                                     Object instruction = chain.getArg(0);
                                     String text = extractTextFromInstruction(instruction);
@@ -131,7 +131,7 @@ public class HookEntry extends XposedModule {
                         m.setAccessible(true);
                         hook(m).intercept(chain -> {
                             try {
-                                AiClientHook.setAiClient(chain.getThis());
+                                AiClientHook.setAiClient(chain.getThisObject());
                                 Object instruction = chain.getArg(0);
                                 String text = extractTextFromInstruction(instruction);
                                 if (text != null && !text.isEmpty()) {
