@@ -532,7 +532,7 @@ public class AiClientHook {
                 f.setAccessible(true);
                 f.set(obj, value);
                 return;
-            } catch (NoSuchFieldException ignored) {}
+            } catch (Exception ignored) {}
             c = c.getSuperclass();
         }
     }
