@@ -16,7 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * 极简 HTTP 服务器 (127.0.0.1)
+ * 极简 HTTP 服务器 (0.0.0.0)
  * 提供 OpenAI 兼容 API: /v1/chat/completions (流式+非流式) /v1/models /openapi.json /health
  * v2.2: 适配 com.miui.voiceassist, 使用 AiClientHook 替代 CliClient
  */
@@ -58,7 +58,7 @@ public class HttpServer {
                     try {
                         serverSocket = new ServerSocket();
                         serverSocket.setReuseAddress(true);
-                        serverSocket.bind(new InetSocketAddress("127.0.0.1", port));
+                        serverSocket.bind(new InetSocketAddress("0.0.0.0", port));
                         break;
                     } catch (Exception e) {
                         Logger.d("Port " + port + " busy, trying " + (port + 1));
@@ -72,7 +72,7 @@ public class HttpServer {
                 }
                 Config.HTTP_PORT = port;
                 ExecutorService executor = Executors.newFixedThreadPool(Config.THREAD_POOL_SIZE);
-                Logger.d("HTTP listening on 127.0.0.1:" + port);
+                Logger.d("HTTP listening on 0.0.0.0:" + port);
                 while (true) {
                     Socket client = serverSocket.accept();
                     executor.submit(() -> handleClient(client));
