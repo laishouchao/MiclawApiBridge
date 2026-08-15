@@ -22,6 +22,19 @@ public class AiClientHook {
         void onDelta(String text);
     }
 
+    // 从 handleInstruction hook 中捕获的 AiClient 实例
+    private static volatile Object capturedAiClient = null;
+
+    /**
+     * 由 HookEntry 的 handleInstruction hook 调用, 保存 AiClient 实例 (this)
+     */
+    public static void setAiClient(Object aiClient) {
+        if (capturedAiClient == null && aiClient != null) {
+            capturedAiClient = aiClient;
+            Logger.d("AiClientHook: captured AiClient instance: " + aiClient.getClass().getName());
+        }
+    }
+
     // 响应同步
     private static final Object lock = new Object();
     private static CountDownLatch responseLatch = null;
@@ -68,41 +81,67 @@ public class AiClientHook {
     }
 
     /**
-     * 获取 VoiceService 中的 AbsAiClient 实例
-     * 通过反射读取 VoiceService.mVoiceServiceRepository 字段,
-     * 再从 Repository 获取 AiClient
+     * 获取 AiClient 实例
+     * 优先使用从 hook 中捕获的实例, 兜底尝试反射
      */
     private static Object getAiClient() {
+        // 方式1: 从 handleInstruction hook 捕获的实例 (最可靠)
+        if (capturedAiClient != null) {
+            return capturedAiClient;
+        }
+
         try {
-            // 尝试获取 VoiceService 的单例
-            Class<?> voiceServiceClass = Class.forName(
-                "com.xiaomi.voiceassistant.VoiceService", false, getHostClassLoader());
-            // VoiceService 可能有静态实例或者通过 ServiceManager 获取
-            // 先尝试通过 ActivityThread 获取
+            // 方式2: 尝试通过 ActivityThread 获取 Application, 再找 AiClient
             Class<?> atClass = Class.forName("android.app.ActivityThread", false, getHostClassLoader());
             Method currentApp = atClass.getDeclaredMethod("currentApplication");
             currentApp.setAccessible(true);
             android.app.Application app = (android.app.Application) currentApp.invoke(null);
             if (app == null) return null;
 
-            // 通过反射找到 VoiceService 实例
-            // VoiceService 继承自 android.app.Service, 需要通过其他方式获取
-            // 尝试直接创建 AiClient 并连接
-            Class<?> aiClientClass = Class.forName(
-                "com.xiaomi.ai.conn.basic.AiClient", false, getHostClassLoader());
-            // AiClient 可能有 getInstance() 或需要通过构造函数创建
-            try {
-                Method getInstance = aiClientClass.getDeclaredMethod("getInstance");
-                getInstance.setAccessible(true);
-                return getInstance.invoke(null);
-            } catch (NoSuchMethodException e) {
-                // 尝试构造函数
+            // 尝试 AiClient 的各种获取方式
+            String[] classNames = {
+                "com.xiaomi.ai.conn.basic.AiClient",
+                "com.xiaomi.ai.conn.basic.AbsAiClient"
+            };
+
+            for (String className : classNames) {
                 try {
-                    return aiClientClass.getConstructor(android.content.Context.class).newInstance(app);
-                } catch (NoSuchMethodException e2) {
-                    Logger.e("AiClientHook: no getInstance or Context constructor");
-                }
+                    Class<?> cls = Class.forName(className, false, getHostClassLoader());
+
+                    // 尝试 getInstance()
+                    for (Method m : cls.getDeclaredMethods()) {
+                        if (m.getParameterCount() == 0 && java.lang.reflect.Modifier.isStatic(m.getModifiers())
+                                && m.getReturnType().isAssignableFrom(cls)) {
+                            m.setAccessible(true);
+                            Object instance = m.invoke(null);
+                            if (instance != null) {
+                                capturedAiClient = instance;
+                                Logger.d("AiClientHook: got instance via " + m.getName());
+                                return instance;
+                            }
+                        }
+                    }
+
+                    // 尝试构造函数
+                    try {
+                        Object instance = cls.getConstructor(android.content.Context.class).newInstance(app);
+                        capturedAiClient = instance;
+                        Logger.d("AiClientHook: created via Context constructor");
+                        return instance;
+                    } catch (NoSuchMethodException ignored) {}
+
+                    // 尝试无参构造
+                    try {
+                        Object instance = cls.getDeclaredConstructor().newInstance();
+                        capturedAiClient = instance;
+                        Logger.d("AiClientHook: created via no-arg constructor");
+                        return instance;
+                    } catch (NoSuchMethodException ignored) {}
+
+                } catch (ClassNotFoundException ignored) {}
             }
+
+            Logger.e("AiClientHook: no getInstance or Context constructor");
         } catch (Exception e) {
             Logger.e("AiClientHook: getAiClient failed: " + e.getMessage());
         }
@@ -186,8 +225,26 @@ public class AiClientHook {
             }
 
             if (sendMethod == null) {
-                // 回退: 尝试直接调用 processInstruction 或 handleTextQuery
-                Logger.e("AiClientHook: sendQueryToMain not found, trying fallback");
+                // 回退: 尝试多种方法名
+                String[] fallbackNames = {"sendQueryToMain", "sendQuery", "sendText", "query", "sendMessage", "handleTextQuery"};
+                for (String methodName : fallbackNames) {
+                    for (Method m : cls.getMethods()) {
+                        if (methodName.equals(m.getName()) && m.getParameterCount() >= 1) {
+                            Class<?> firstParam = m.getParameterTypes()[0];
+                            if (firstParam == String.class || firstParam == CharSequence.class) {
+                                sendMethod = m;
+                                Logger.d("AiClientHook: found fallback method: " + methodName);
+                                break;
+                            }
+                        }
+                    }
+                    if (sendMethod != null) break;
+                }
+            }
+
+            if (sendMethod == null) {
+                // 最终回退: 尝试 VoiceService 的方法
+                Logger.e("AiClientHook: no suitable send method found, trying VoiceService fallback");
                 return tryFallbackChat(aiClient, text, chatId, agentId);
             }
 
