@@ -208,12 +208,12 @@ public class AiClientHook {
                         (java.util.Map<android.os.IBinder, android.app.Service>) cachedMServicesField.get(cachedActivityThread);
                     if (services != null) {
                         for (android.app.Service svc : services.values()) {
-                            Object client = findObjectWithMethod(svc, "sendQueryToMain", 0, new java.util.IdentityHashMap<>());
-                            if (client != null) {
-                                capturedAiClient = client;
-                                Logger.d("AiClientHook: FOUND sendQueryToMain on: " + client.getClass().getName()
+                            Object methodClient = findObjectWithMethod(svc, "sendQueryToMain", 0, new java.util.IdentityHashMap<>());
+                            if (methodClient != null) {
+                                capturedAiClient = methodClient;
+                                Logger.d("AiClientHook: FOUND sendQueryToMain on: " + methodClient.getClass().getName()
                                     + " in " + svc.getClass().getName());
-                                return client;
+                                return methodClient;
                             }
                         }
                     }
