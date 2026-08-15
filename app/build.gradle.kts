@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.guocheng1378.miclawbridge"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "3.0"
+        versionCode = 21
+        versionName = "3.1"
     }
 
     signingConfigs {

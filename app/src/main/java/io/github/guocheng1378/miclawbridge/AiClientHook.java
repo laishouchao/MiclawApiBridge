@@ -7,13 +7,17 @@ import java.lang.reflect.Method;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
+import org.json.JSONObject;
+import org.json.JSONArray;
+
 /**
- * v3.0 Channel 方案: 通过 com.xiaomi.ai.core.Channel 发送/接收消息
+ * v3.1 Channel 方案: 通过 com.xiaomi.ai.core.Channel 发送/接收消息
  *
  * 核心机制:
  * 1. setChannel() - 从 Hook 捕获 Channel 实例
- * 2. chat() - 通过 Channel 发送文本查询 (待实现, 需要诊断日志确认 API)
- * 3. onNlpEvent() - 从 NLP 响应类拦截 AI 回复
+ * 2. chat() - 通过 Channel.postEvent(Nlp$ExecuteQuery) 发送文本查询
+ * 3. onInstructionJson() - 从 InstructionWrapper JSON 解析 AI 回复文本
+ * 4. onNlpMarker() - 跟踪 StartAnswer/FinishAnswer 等标记事件
  */
 public class AiClientHook {
 
@@ -21,59 +25,200 @@ public class AiClientHook {
         void onDelta(String text);
     }
 
-    // Channel 实例 (从 Hook 捕获)
     private static volatile Object capturedChannel = null;
-    // PostBack 实例 (参考用)
-    private static volatile Object lastPostBack = null;
-    // 旧的 AiClient 实例 (保留兼容)
-    private static volatile Object capturedAiClient = null;
+    private static volatile Object capturedListener = null;
 
     /** 由 HookEntry 调用: 捕获 Channel 实例 */
     public static void setChannel(Object channel) {
-        if (capturedChannel == null && channel != null) {
+        if (channel != null) {
             capturedChannel = channel;
             Logger.d("AiClientHook: captured Channel: " + channel.getClass().getName());
         }
     }
 
-    /** 由 HookEntry 调用: 捕获 PostBack 创建 */
-    public static void onPostBackCreated(Object postBack) {
-        lastPostBack = postBack;
-        Logger.d("AiClientHook: PostBack captured: " + postBack.getClass().getName());
-    }
-
-    /** 由 HookEntry 调用: 处理 NLP 事件 */
-    public static void onNlpEvent(String className, Object event) {
-        Logger.d("AiClientHook: NLP event: " + className);
-        // 尝试从事件中提取文本
-        String text = extractTextFromObject(event);
-        if (text != null && !text.isEmpty()) {
-            Logger.d("AiClientHook: extracted text from " + className + ": " + truncate(text, 200));
-            boolean isStream = className.contains("StartStream") || className.contains("LargeLanguageModel");
-            boolean isEnd = className.contains("FinishStream") || className.contains("FinishAnswer");
-            if (isEnd) {
-                onEnd();
-            } else {
-                onResponse(text, isStream);
-            }
+    /** 由 HookEntry 调用: 捕获 ChannelListener 实例 */
+    public static void setChannelListener(Object listener) {
+        if (listener != null && capturedListener == null) {
+            capturedListener = listener;
+            Logger.d("AiClientHook: captured ChannelListener: " + listener.getClass().getName());
         }
     }
 
-    /** 保留兼容: 由旧的 handleInstruction hook 调用 */
-    public static void setAiClient(Object aiClient) {
-        if (capturedAiClient == null && aiClient != null) {
-            capturedAiClient = aiClient;
-            Logger.d("AiClientHook: captured AiClient (legacy): " + aiClient.getClass().getName());
-        }
-    }
-
-    // 响应同步
+    // === 响应同步 ===
     private static final Object lock = new Object();
     private static CountDownLatch responseLatch = null;
     private static String lastReply = null;
     private static String lastError = null;
     private static int lastFrames = 0;
     private static TextSink currentSink = null;
+    private static boolean answerStarted = false;
+
+    /**
+     * 处理 InstructionWrapper 的 JSON
+     * JSON 格式: {"header":{"name":"...","namespace":"...","dialog_id":"...","id":"..."},"payload":{...}}
+     */
+    public static void onInstructionJson(String json) {
+        try {
+            JSONObject obj = new JSONObject(json);
+            JSONObject header = obj.optJSONObject("header");
+            if (header == null) return;
+
+            String name = header.optString("name", "");
+            String namespace = header.optString("namespace", "");
+            JSONObject payload = obj.optJSONObject("payload");
+
+            // 跳过非回复指令
+            if ("System".equals(namespace) && ("Ack".equals(name) || "Abort".equals(name))) return;
+            if ("SpeechRecognizer".equals(namespace)) return; // ASR 结果, 非回复
+            if ("Dialog".equals(namespace) && "Finish".equals(name)) {
+                // 对话结束
+                onEnd();
+                return;
+            }
+
+            Logger.d("AiClientHook: Instruction: " + namespace + "." + name + " payload=" + (payload != null ? payload.toString() : "null"));
+
+            // NLP 回复标记
+            if ("Nlp".equals(namespace)) {
+                if ("StartAnswer".equals(name)) {
+                    answerStarted = true;
+                    return;
+                }
+                if ("FinishAnswer".equals(name)) {
+                    onEnd();
+                    return;
+                }
+            }
+
+            // 从 payload 中提取文本
+            if (payload != null) {
+                String text = extractTextFromPayload(payload, name, namespace);
+                if (text != null && !text.isEmpty()) {
+                    Logger.d("AiClientHook: extracted text from " + namespace + "." + name + ": " + truncate(text, 200));
+                    onResponse(text, false);
+                }
+            }
+        } catch (Exception e) {
+            Logger.d("AiClientHook: JSON parse error: " + e.getMessage());
+        }
+    }
+
+    /** 由 ChannelListener.onInstruction hook 调用 */
+    public static void onInstructionObject(Object instruction) {
+        if (instruction == null) return;
+        try {
+            String str = instruction.toString();
+            if (str.startsWith("{")) {
+                onInstructionJson(str);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** NLP 标记事件 (StartAnswer/FinishAnswer/StartStream/FinishStream) */
+    public static void onNlpMarker(String name) {
+        Logger.d("AiClientHook: NLP marker: " + name);
+        if ("StartAnswer".equals(name) || "StartStream".equals(name)) {
+            answerStarted = true;
+        } else if ("FinishAnswer".equals(name) || "FinishStream".equals(name)) {
+            onEnd();
+        }
+    }
+
+    /**
+     * 从 payload JSON 中提取文本
+     */
+    private static String extractTextFromPayload(JSONObject payload, String instructionName, String namespace) {
+        // 直接检查 text 字段
+        String text = payload.optString("text", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        // 检查 answer 字段
+        text = payload.optString("answer", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        // 检查 content 字段
+        text = payload.optString("content", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        // 检查 reply 字段
+        text = payload.optString("reply", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        // 检查 data.tts.text 字段 (TTS 回复)
+        JSONObject data = payload.optJSONObject("data");
+        if (data != null) {
+            text = data.optString("text", null);
+            if (text != null && !text.isEmpty()) return text;
+            JSONObject tts = data.optJSONObject("tts");
+            if (tts != null) {
+                text = tts.optString("text", null);
+                if (text != null && !text.isEmpty()) return text;
+            }
+        }
+
+        // 检查 tts.text 字段
+        JSONObject tts = payload.optJSONObject("tts");
+        if (tts != null) {
+            text = tts.optString("text", null);
+            if (text != null && !text.isEmpty()) return text;
+        }
+
+        // 检查 results 数组 (可能用于流式回复)
+        JSONArray results = payload.optJSONArray("results");
+        if (results != null && results.length() > 0) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < results.length(); i++) {
+                JSONObject r = results.optJSONObject(i);
+                if (r != null) {
+                    String t = r.optString("text", null);
+                    if (t != null && !t.isEmpty()) sb.append(t);
+                }
+            }
+            if (sb.length() > 0) return sb.toString();
+        }
+
+        // 检查流式字段
+        text = payload.optString("delta", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        text = payload.optString("chunk", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        // 递归检查 payload 中的所有字符串字段
+        return findFirstLongString(payload);
+    }
+
+    /** 递归查找 JSON 中第一个长度 > 5 的字符串值 */
+    private static String findFirstLongString(JSONObject obj) {
+        try {
+            java.util.Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                Object val = obj.get(key);
+                if (val instanceof String) {
+                    String s = (String) val;
+                    if (s.length() > 5) return s;
+                } else if (val instanceof JSONObject) {
+                    String found = findFirstLongString((JSONObject) val);
+                    if (found != null) return found;
+                } else if (val instanceof JSONArray) {
+                    JSONArray arr = (JSONArray) val;
+                    for (int i = 0; i < arr.length(); i++) {
+                        Object item = arr.opt(i);
+                        if (item instanceof String && ((String) item).length() > 5) {
+                            return (String) item;
+                        } else if (item instanceof JSONObject) {
+                            String found = findFirstLongString((JSONObject) item);
+                            if (found != null) return found;
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    // === 响应回调 ===
 
     public static void onResponse(String text, boolean isStreaming) {
         synchronized (lock) {
@@ -82,7 +227,8 @@ public class AiClientHook {
                 if (lastReply == null) lastReply = "";
                 lastReply += text;
             } else {
-                lastReply = text;
+                if (lastReply == null) lastReply = "";
+                lastReply += text;
             }
             if (currentSink != null && text != null) {
                 currentSink.onDelta(text);
@@ -103,10 +249,9 @@ public class AiClientHook {
         }
     }
 
-    // 缓存
+    // === 发送 ===
+
     private static ClassLoader hostClassLoader = null;
-    private static Object cachedActivityThread = null;
-    private static java.lang.reflect.Field cachedMServicesField = null;
 
     private static ClassLoader getHostClassLoader() {
         if (hostClassLoader != null) return hostClassLoader;
@@ -133,197 +278,183 @@ public class AiClientHook {
             lastReply = null;
             lastError = null;
             lastFrames = 0;
+            answerStarted = false;
             responseLatch = new CountDownLatch(1);
             currentSink = (sink != null) ? sink::onDelta : null;
         }
 
-        Logger.d("AiClientHook: chat called, text=" + text);
+        Logger.d("AiClientHook: chat called, text=" + truncate(text, 100));
 
-        // 方式1: 通过 Channel 发送 (v3.0 新方案)
+        // 方式1: 通过 Channel.postEvent 发送
         if (capturedChannel != null) {
-            CliClient.CliResult result = trySendViaChannel(text, chatId, agentId);
-            if (result != null) return result;
+            boolean sent = sendViaPostEvent(text);
+            if (sent) {
+                Logger.d("AiClientHook: sent via postEvent, waiting response...");
+                boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+                synchronized (lock) {
+                    String reply = lastReply != null ? lastReply : "";
+                    String error = lastError;
+                    if (!completed && error == null) {
+                        error = "TIMEOUT: no response within " + Config.READ_TIMEOUT + "ms";
+                    }
+                    Logger.d("AiClientHook: done, len=" + reply.length() + " frames=" + lastFrames + " error=" + error);
+                    return new CliClient.CliResult(reply, error, chatId, lastFrames);
+                }
+            }
         }
 
-        // 方式2: 搜索 Channel 实例 (可能尚未捕获)
+        // 方式2: 搜索 Channel 实例
         if (capturedChannel == null) {
             Object channel = findChannelInstance();
             if (channel != null) {
                 capturedChannel = channel;
                 Logger.d("AiClientHook: found Channel via search: " + channel.getClass().getName());
-                CliClient.CliResult result = trySendViaChannel(text, chatId, agentId);
-                if (result != null) return result;
+                boolean sent = sendViaPostEvent(text);
+                if (sent) {
+                    Logger.d("AiClientHook: sent via postEvent (searched), waiting...");
+                    boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
+                    synchronized (lock) {
+                        String reply = lastReply != null ? lastReply : "";
+                        String error = lastError;
+                        if (!completed && error == null) error = "TIMEOUT";
+                        return new CliClient.CliResult(reply, error, chatId, lastFrames);
+                    }
+                }
             }
         }
 
-        // 方式3: 通过 Intent 触发文本查询 (回退)
-        CliClient.CliResult intentResult = trySendViaIntent(text);
-        if (intentResult != null) return intentResult;
-
+        // 方式3: Intent 回退
+        Logger.d("AiClientHook: Channel send failed, trying Intent fallback");
+        trySendViaIntent(text);
+        boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
         synchronized (lock) {
-            String error = lastError != null ? lastError : "Channel not available and Intent fallback failed";
-            return new CliClient.CliResult("", error, chatId, 0);
+            String reply = lastReply != null ? lastReply : "";
+            String error = lastError;
+            if (!completed && error == null) error = "TIMEOUT: Intent fallback";
+            return new CliClient.CliResult(reply, error, chatId, lastFrames);
         }
     }
 
     /**
-     * 通过 Channel 发送文本查询
+     * 通过 Channel.postEvent(Event) 发送 Nlp$ExecuteQuery
      */
-    private static CliClient.CliResult trySendViaChannel(String text, String chatId, String agentId) {
+    private static boolean sendViaPostEvent(String text) {
         try {
             Object channel = capturedChannel;
-            Class<?> channelClass = channel.getClass();
             ClassLoader cl = getHostClassLoader();
 
-            // 尝试构造 SpeechRecognizer$PostBack 事件
-            try {
-                Class<?> postBackClass = Class.forName("com.xiaomi.ai.api.SpeechRecognizer$PostBack", false, cl);
-                Logger.d("AiClientHook: PostBack class found, constructors:");
-                for (java.lang.reflect.Constructor<?> ctor : postBackClass.getDeclaredConstructors()) {
-                    StringBuilder sb = new StringBuilder("  ctor(");
-                    for (Class<?> p : ctor.getParameterTypes()) sb.append(p.getName()).append(", ");
-                    sb.append(")");
-                    Logger.d(sb.toString());
-                }
+            // 创建 Nlp$ExecuteQuery 事件
+            Class<?> executeQueryClass = Class.forName("com.xiaomi.ai.api.Nlp$ExecuteQuery", false, cl);
+            Object event = null;
 
-                // 尝试无参构造函数
-                java.lang.reflect.Constructor<?> noArg = null;
-                for (java.lang.reflect.Constructor<?> ctor : postBackClass.getDeclaredConstructors()) {
-                    if (ctor.getParameterCount() == 0) { noArg = ctor; break; }
-                }
-
-                Object postBack = null;
-                if (noArg != null) {
-                    noArg.setAccessible(true);
-                    postBack = noArg.newInstance();
-                    Logger.d("AiClientHook: created PostBack via no-arg ctor");
-                } else {
-                    // 尝试单参数 (String) 构造函数
-                    for (java.lang.reflect.Constructor<?> ctor : postBackClass.getDeclaredConstructors()) {
-                        if (ctor.getParameterCount() == 1 && ctor.getParameterTypes()[0] == String.class) {
-                            ctor.setAccessible(true);
-                            postBack = ctor.newInstance(text);
-                            Logger.d("AiClientHook: created PostBack via String ctor");
-                            break;
-                        }
-                    }
-                }
-
-                if (postBack != null) {
-                    // 尝试设置文本内容
-                    setField(postBack, "text", text);
-                    setField(postBack, "query", text);
-                    setField(postBack, "content", text);
-                    callSetter(postBack, "setText", text);
-                    callSetter(postBack, "setQuery", text);
-                    callSetter(postBack, "setContent", text);
-
-                    // 通过 Channel 发送
-                    boolean sent = sendThroughChannel(channel, postBack);
-                    if (sent) {
-                        Logger.d("AiClientHook: sent via Channel, waiting response...");
-                        boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
-                        synchronized (lock) {
-                            String reply = lastReply != null ? lastReply : "";
-                            String error = lastError;
-                            if (!completed && error == null) {
-                                error = "TIMEOUT: no response within " + Config.READ_TIMEOUT + "ms";
-                            }
-                            Logger.d("AiClientHook: done, len=" + reply.length() + " frames=" + lastFrames + " error=" + error);
-                            return new CliClient.CliResult(reply, error, chatId, lastFrames);
-                        }
-                    }
-                }
-            } catch (Exception e) {
-                Logger.d("AiClientHook: PostBack approach failed: " + e.getMessage());
-            }
-
-            // 尝试 Nlp$ExecuteQuery
-            try {
-                Class<?> executeQueryClass = Class.forName("com.xiaomi.ai.api.Nlp$ExecuteQuery", false, cl);
-                Logger.d("AiClientHook: ExecuteQuery class found");
-                // 构造并设置查询文本
-                for (java.lang.reflect.Constructor<?> ctor : executeQueryClass.getDeclaredConstructors()) {
+            // 尝试无参构造函数
+            for (java.lang.reflect.Constructor<?> ctor : executeQueryClass.getDeclaredConstructors()) {
+                if (ctor.getParameterCount() == 0) {
                     ctor.setAccessible(true);
-                    if (ctor.getParameterCount() == 0) {
-                        Object query = ctor.newInstance();
-                        setField(query, "query", text);
-                        setField(query, "text", text);
-                        callSetter(query, "setQuery", text);
-                        callSetter(query, "setText", text);
-                        if (sendThroughChannel(channel, query)) {
-                            Logger.d("AiClientHook: sent ExecuteQuery via Channel");
-                            boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
-                            synchronized (lock) {
-                                String reply = lastReply != null ? lastReply : "";
-                                String error = lastError;
-                                if (!completed && error == null) error = "TIMEOUT";
-                                return new CliClient.CliResult(reply, error, chatId, lastFrames);
-                            }
-                        }
-                        break;
+                    event = ctor.newInstance();
+                    break;
+                }
+            }
+            if (event == null) {
+                // 尝试 String 参数构造函数
+                for (java.lang.reflect.Constructor<?> ctor : executeQueryClass.getDeclaredConstructors()) {
+                    if (ctor.getParameterCount() == 1) {
+                        ctor.setAccessible(true);
+                        try {
+                            event = ctor.newInstance(text);
+                            break;
+                        } catch (Exception ignored) {}
                     }
                 }
-            } catch (Exception e) {
-                Logger.d("AiClientHook: ExecuteQuery approach failed: " + e.getMessage());
             }
+            if (event == null) {
+                Logger.d("AiClientHook: cannot create Nlp$ExecuteQuery instance");
+                return false;
+            }
+
+            // 设置查询文本
+            try {
+                Method setQuery = executeQueryClass.getDeclaredMethod("setQuery", String.class);
+                setQuery.setAccessible(true);
+                setQuery.invoke(event, text);
+                Logger.d("AiClientHook: set query text on ExecuteQuery");
+            } catch (Exception e) {
+                Logger.d("AiClientHook: setQuery failed: " + e.getMessage());
+            }
+
+            // 调用 Channel.postEvent(event)
+            return callPostEvent(channel, event);
 
         } catch (Exception e) {
-            Logger.e("AiClientHook: trySendViaChannel failed: " + e.getMessage());
+            Logger.e("AiClientHook: sendViaPostEvent failed: " + e.getMessage());
+            return false;
         }
-        return null;
     }
 
     /**
-     * 通过 Channel 发送事件
+     * 调用 Channel.postEvent(Event)
      */
-    private static boolean sendThroughChannel(Object channel, Object event) {
-        Class<?> channelClass = channel.getClass();
-        Class<?> eventClass = event.getClass();
+    private static boolean callPostEvent(Object channel, Object event) {
+        try {
+            // 获取 postEvent 方法 (可能在实现类中, 不在抽象基类)
+            Class<?> channelClass = channel.getClass();
+            Method postEvent = null;
 
-        // 查找发送方法: send, sendEvent, sendInstruction, sendEventInternal 等
-        String[] sendMethodNames = {
-            "sendEvent", "sendInstruction", "send", "sendEventInternal",
-            "dispatchEvent", "dispatchInstruction", "publish", "submit"
-        };
-
-        for (String methodName : sendMethodNames) {
-            for (Method m : channelClass.getMethods()) {
-                if (methodName.equals(m.getName()) && m.getParameterCount() >= 1) {
-                    Class<?> firstParam = m.getParameterTypes()[0];
-                    if (firstParam.isAssignableFrom(eventClass) || firstParam == Object.class) {
-                        try {
-                            m.setAccessible(true);
-                            Object[] args = new Object[m.getParameterCount()];
-                            args[0] = event;
-                            for (int i = 1; i < args.length; i++) {
-                                Class<?> pt = m.getParameterTypes()[i];
-                                if (pt == int.class) args[i] = 0;
-                                else if (pt == boolean.class) args[i] = false;
-                                else if (pt == String.class) args[i] = "";
-                                else args[i] = null;
+            // 搜索 channel 实例的类及其父类
+            Class<?> cls = channelClass;
+            while (cls != null && postEvent == null) {
+                try {
+                    postEvent = cls.getDeclaredMethod("postEvent", event.getClass());
+                } catch (NoSuchMethodException e) {
+                    // 尝试用 Event 基类作为参数类型
+                    try {
+                        Class<?> eventBase = Class.forName("com.xiaomi.ai.api.common.Event", false, getHostClassLoader());
+                        postEvent = cls.getDeclaredMethod("postEvent", eventBase);
+                    } catch (Exception e2) {
+                        // 尝试所有 postEvent 方法
+                        for (Method m : cls.getDeclaredMethods()) {
+                            if (m.getName().equals("postEvent") && m.getParameterCount() == 1) {
+                                Class<?> paramType = m.getParameterTypes()[0];
+                                if (paramType.isAssignableFrom(event.getClass())) {
+                                    postEvent = m;
+                                    break;
+                                }
                             }
-                            m.invoke(channel, args);
-                            Logger.d("AiClientHook: sent via " + methodName + "()");
-                            return true;
-                        } catch (Exception e) {
-                            Logger.d("AiClientHook: " + methodName + " failed: " + e.getMessage());
                         }
                     }
                 }
+                cls = cls.getSuperclass();
             }
-        }
 
-        Logger.d("AiClientHook: no suitable send method on Channel for " + eventClass.getName());
+            if (postEvent != null) {
+                postEvent.setAccessible(true);
+                Object result = postEvent.invoke(channel, event);
+                Logger.d("AiClientHook: postEvent() called, result=" + result);
+                return true;
+            } else {
+                // 最后尝试: 用 getMethod 搜索公开方法
+                try {
+                    Class<?> eventBase = Class.forName("com.xiaomi.ai.api.common.Event", false, getHostClassLoader());
+                    postEvent = channelClass.getMethod("postEvent", eventBase);
+                    postEvent.setAccessible(true);
+                    postEvent.invoke(channel, event);
+                    Logger.d("AiClientHook: postEvent() called via getMethod");
+                    return true;
+                } catch (Exception e) {
+                    Logger.d("AiClientHook: postEvent not found: " + e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            Logger.e("AiClientHook: callPostEvent failed: " + e.getMessage());
+        }
         return false;
     }
 
     /**
      * 通过 Intent 发送文本查询 (回退方案)
      */
-    private static CliClient.CliResult trySendViaIntent(String text) {
+    private static void trySendViaIntent(String text) {
         try {
-            Logger.d("AiClientHook: trying Intent fallback");
             android.content.Intent intent = new android.content.Intent("android.intent.action.ASSIST");
             intent.putExtra("android.intent.extra.ASSIST_INPUT_TEXT", text);
             intent.putExtra("query", text);
@@ -336,45 +467,37 @@ public class AiClientHook {
             if (ctx != null) {
                 intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
                 ctx.startActivity(intent);
-                Logger.d("AiClientHook: sent via Intent, waiting response...");
-                boolean completed = responseLatch.await(Config.READ_TIMEOUT, TimeUnit.MILLISECONDS);
-                synchronized (lock) {
-                    String reply = lastReply != null ? lastReply : "";
-                    String error = lastError;
-                    if (!completed && error == null) error = "TIMEOUT: Intent fallback";
-                    return new CliClient.CliResult(reply, error, null, lastFrames);
-                }
+                Logger.d("AiClientHook: sent via Intent");
             }
         } catch (Exception e) {
             Logger.d("AiClientHook: Intent fallback failed: " + e.getMessage());
+            synchronized (lock) {
+                lastError = "Intent fallback failed: " + e.getMessage();
+                if (responseLatch != null) responseLatch.countDown();
+            }
         }
-        return null;
     }
 
     /**
-     * 搜索 Channel 实例
+     * 搜索 Channel 实例 (从 ActivityThread 的 Service 中)
      */
     private static Object findChannelInstance() {
         try {
             Class<?> atClass = Class.forName("android.app.ActivityThread", false, getHostClassLoader());
-            if (cachedActivityThread == null) {
-                Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
-                currentAt.setAccessible(true);
-                cachedActivityThread = currentAt.invoke(null);
-            }
-            if (cachedMServicesField == null) {
-                cachedMServicesField = atClass.getDeclaredField("mServices");
-                cachedMServicesField.setAccessible(true);
-            }
-            if (cachedActivityThread != null) {
-                @SuppressWarnings("unchecked")
-                java.util.Map<android.os.IBinder, android.app.Service> services =
-                    (java.util.Map<android.os.IBinder, android.app.Service>) cachedMServicesField.get(cachedActivityThread);
-                if (services != null) {
-                    for (android.app.Service svc : services.values()) {
-                        Object channel = findObjectByClassName(svc, "com.xiaomi.ai.core.Channel");
-                        if (channel != null) return channel;
-                    }
+            Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
+            currentAt.setAccessible(true);
+            Object at = currentAt.invoke(null);
+            if (at == null) return null;
+
+            Field mServicesField = atClass.getDeclaredField("mServices");
+            mServicesField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            java.util.Map<android.os.IBinder, android.app.Service> services =
+                (java.util.Map<android.os.IBinder, android.app.Service>) mServicesField.get(at);
+            if (services != null) {
+                for (android.app.Service svc : services.values()) {
+                    Object channel = findObjectByClassName(svc, "com.xiaomi.ai.core.Channel");
+                    if (channel != null) return channel;
                 }
             }
 
@@ -383,8 +506,7 @@ public class AiClientHook {
             currentApp.setAccessible(true);
             android.app.Application app = (android.app.Application) currentApp.invoke(null);
             if (app != null) {
-                Object channel = findObjectByClassName(app, "com.xiaomi.ai.core.Channel");
-                if (channel != null) return channel;
+                return findObjectByClassName(app, "com.xiaomi.ai.core.Channel");
             }
         } catch (Exception e) {
             Logger.e("AiClientHook: findChannelInstance failed: " + e.getMessage());
@@ -424,72 +546,6 @@ public class AiClientHook {
             }
             cls = cls.getSuperclass();
         }
-        return null;
-    }
-
-    // === 工具方法 ===
-
-    private static void setField(Object obj, String fieldName, String value) {
-        try {
-            Class<?> cls = obj.getClass();
-            while (cls != null) {
-                try {
-                    Field f = cls.getDeclaredField(fieldName);
-                    if (f.getType() == String.class) {
-                        f.setAccessible(true);
-                        f.set(obj, value);
-                        Logger.d("AiClientHook: set " + fieldName + " = " + truncate(value, 50));
-                        return;
-                    }
-                } catch (NoSuchFieldException ignored) {}
-                cls = cls.getSuperclass();
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private static void callSetter(Object obj, String methodName, String value) {
-        try {
-            Method m = obj.getClass().getMethod(methodName, String.class);
-            m.setAccessible(true);
-            m.invoke(obj, value);
-            Logger.d("AiClientHook: called " + methodName + "()");
-        } catch (Exception ignored) {}
-    }
-
-    private static String extractTextFromObject(Object obj) {
-        if (obj == null) return null;
-        try {
-            Class<?> cls = obj.getClass();
-            // 尝试 getter 方法
-            String[] getters = {"getText", "getQuery", "getContent", "getAnswer", "getReply", "getData", "getMessage"};
-            for (String getter : getters) {
-                try {
-                    Method m = cls.getMethod(getter);
-                    m.setAccessible(true);
-                    Object val = m.invoke(obj);
-                    if (val instanceof String && !((String) val).isEmpty()) {
-                        return (String) val;
-                    }
-                    if (val != null) {
-                        String s = val.toString();
-                        if (s.length() > 5) return s;
-                    }
-                } catch (NoSuchMethodException ignored) {}
-            }
-            // 尝试字段
-            while (cls != null && cls != Object.class) {
-                for (Field f : cls.getDeclaredFields()) {
-                    f.setAccessible(true);
-                    if (f.getType() == String.class) {
-                        String val = (String) f.get(obj);
-                        if (val != null && val.length() > 2) {
-                            return val;
-                        }
-                    }
-                }
-                cls = cls.getSuperclass();
-            }
-        } catch (Exception ignored) {}
         return null;
     }
 
