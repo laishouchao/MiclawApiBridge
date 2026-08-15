@@ -82,7 +82,7 @@ public class AiClientHook {
 
     /**
      * 获取 AiClient 实例
-     * 优先使用从 hook 中捕获的实例, 兜底尝试反射
+     * 优先使用从 hook 中捕获的实例, 然后从 VoiceService 中搜索, 最后尝试反射创建
      */
     private static Object getAiClient() {
         // 方式1: 从 handleInstruction hook 捕获的实例 (最可靠)
@@ -91,24 +91,59 @@ public class AiClientHook {
         }
 
         try {
-            // 方式2: 尝试通过 ActivityThread 获取 Application, 再找 AiClient
             Class<?> atClass = Class.forName("android.app.ActivityThread", false, getHostClassLoader());
             Method currentApp = atClass.getDeclaredMethod("currentApplication");
             currentApp.setAccessible(true);
             android.app.Application app = (android.app.Application) currentApp.invoke(null);
             if (app == null) return null;
 
-            // 尝试 AiClient 的各种获取方式
+            // 方式2: 从 ActivityThread.mServices 中找 VoiceService, 再提取 AiClient
+            try {
+                java.lang.reflect.Field mServicesField = atClass.getDeclaredField("mServices");
+                mServicesField.setAccessible(true);
+                // 获取当前 ActivityThread 实例
+                Method currentAt = atClass.getDeclaredMethod("currentActivityThread");
+                currentAt.setAccessible(true);
+                Object activityThread = currentAt.invoke(null);
+                if (activityThread != null) {
+                    @SuppressWarnings("unchecked")
+                    java.util.Map<android.os.IBinder, android.app.Service> services =
+                        (java.util.Map<android.os.IBinder, android.app.Service>) mServicesField.get(activityThread);
+                    if (services != null) {
+                        for (android.app.Service svc : services.values()) {
+                            if (svc.getClass().getName().contains("VoiceService") ||
+                                svc.getClass().getName().contains("voiceassist")) {
+                                Logger.d("AiClientHook: found service: " + svc.getClass().getName());
+                                Object client = findAiClientInObject(svc);
+                                if (client != null) {
+                                    capturedAiClient = client;
+                                    Logger.d("AiClientHook: found AiClient in VoiceService: " + client.getClass().getName());
+                                    return client;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Logger.e("AiClientHook: VoiceService search failed: " + e.getMessage());
+            }
+
+            // 方式3: 遍历 Application 中的 AiClient 字段
+            Object client = findAiClientInObject(app);
+            if (client != null) {
+                capturedAiClient = client;
+                Logger.d("AiClientHook: found AiClient in Application");
+                return client;
+            }
+
+            // 方式4: 尝试 getInstance() 静态方法
             String[] classNames = {
                 "com.xiaomi.ai.conn.basic.AiClient",
                 "com.xiaomi.ai.conn.basic.AbsAiClient"
             };
-
             for (String className : classNames) {
                 try {
                     Class<?> cls = Class.forName(className, false, getHostClassLoader());
-
-                    // 尝试 getInstance()
                     for (Method m : cls.getDeclaredMethods()) {
                         if (m.getParameterCount() == 0 && java.lang.reflect.Modifier.isStatic(m.getModifiers())
                                 && m.getReturnType().isAssignableFrom(cls)) {
@@ -121,29 +156,42 @@ public class AiClientHook {
                             }
                         }
                     }
-
-                    // 尝试构造函数
-                    try {
-                        Object instance = cls.getConstructor(android.content.Context.class).newInstance(app);
-                        capturedAiClient = instance;
-                        Logger.d("AiClientHook: created via Context constructor");
-                        return instance;
-                    } catch (NoSuchMethodException ignored) {}
-
-                    // 尝试无参构造
-                    try {
-                        Object instance = cls.getDeclaredConstructor().newInstance();
-                        capturedAiClient = instance;
-                        Logger.d("AiClientHook: created via no-arg constructor");
-                        return instance;
-                    } catch (NoSuchMethodException ignored) {}
-
                 } catch (ClassNotFoundException ignored) {}
             }
 
-            Logger.e("AiClientHook: no getInstance or Context constructor");
+            Logger.e("AiClientHook: no AiClient found anywhere");
         } catch (Exception e) {
             Logger.e("AiClientHook: getAiClient failed: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * 在对象及其父类中搜索 AiClient 类型的字段
+     */
+    private static Object findAiClientInObject(Object obj) {
+        Class<?> cls = obj.getClass();
+        while (cls != null && cls != Object.class) {
+            for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
+                Class<?> type = f.getType();
+                if (type.getName().contains("AiClient") || type.getName().contains("AbsAiClient") ||
+                    type.getName().contains("AiConnection")) {
+                    f.setAccessible(true);
+                    try {
+                        Object val = f.get(obj);
+                        if (val != null) {
+                            Logger.d("AiClientHook: field " + cls.getSimpleName() + "." + f.getName() + " -> " + val.getClass().getName());
+                            // 如果是 AiConnection, 递归查找其中的 AiClient
+                            if (!type.getName().contains("AiClient")) {
+                                Object nested = findAiClientInObject(val);
+                                if (nested != null) return nested;
+                            }
+                            return val;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+            cls = cls.getSuperclass();
         }
         return null;
     }
