@@ -403,6 +403,8 @@ public class HttpServer {
         StringBuilder sb = new StringBuilder();
 
         // 默认大模型人设 (无 system 时注入)
+        // v3.6: voiceassist 模型跳过系统提示词, 直接发送用户消息
+        boolean isVoiceAssist = model != null && model.startsWith("voiceassist.");
         boolean hasSystem = false;
         if (messages != null) {
             for (int i = 0; i < messages.length(); i++) {
@@ -410,7 +412,7 @@ public class HttpServer {
                 if (m != null && "system".equals(m.optString("role", ""))) { hasSystem = true; break; }
             }
         }
-        if (!hasSystem) {
+        if (!hasSystem && !isVoiceAssist) {
             sb.append("系统设定：你是通用 AI 助手，具备文件处理、代码执行、联网搜索、数据分析等能力。回答问题要完整专业、条理清晰；简单问题直接回答，不要调用工具；涉及文件、代码、实时数据、设备操作时才使用工具。\n\n");
         }
 

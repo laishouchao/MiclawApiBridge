@@ -295,7 +295,13 @@ public class AiClientHook {
     }
 
     private static String extractTextFromPayload(JSONObject payload, String instructionName, String namespace) {
+        // v3.6: Skip Dialog.Reject - it's not a text response, it's a rejection event
+        if ("Dialog".equals(namespace) && "Reject".equals(instructionName)) return null;
+
         String text = payload.optString("text", null);
+        if (text != null && !text.isEmpty()) return text;
+
+        text = payload.optString("markdown_text", null);
         if (text != null && !text.isEmpty()) return text;
 
         text = payload.optString("answer", null);
@@ -305,9 +311,6 @@ public class AiClientHook {
         if (text != null && !text.isEmpty()) return text;
 
         text = payload.optString("reply", null);
-        if (text != null && !text.isEmpty()) return text;
-
-        text = payload.optString("query", null);
         if (text != null && !text.isEmpty()) return text;
 
         JSONObject data = payload.optJSONObject("data");
