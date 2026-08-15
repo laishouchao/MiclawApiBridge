@@ -167,33 +167,52 @@ public class AiClientHook {
     }
 
     /**
-     * 在对象及其父类中搜索 AiClient 类型的字段
+     * 在对象及其父类中递归搜索 AiClient 实例
+     * 先按字段名/类型名快速匹配, 再 instanceof 检查
      */
     private static Object findAiClientInObject(Object obj) {
+        return findAiClientInObject(obj, 0, new java.util.IdentityHashMap<>());
+    }
+
+    private static Object findAiClientInObject(Object obj, int depth, java.util.IdentityHashMap<Object, Boolean> visited) {
+        if (obj == null || depth > 4 || visited.containsKey(obj)) return null;
+        visited.put(obj, Boolean.TRUE);
+
         Class<?> cls = obj.getClass();
+        // 先检查自己是否就是 AiClient
+        if (isAiClientClass(cls)) return obj;
+
         while (cls != null && cls != Object.class) {
             for (java.lang.reflect.Field f : cls.getDeclaredFields()) {
                 Class<?> type = f.getType();
-                if (type.getName().contains("AiClient") || type.getName().contains("AbsAiClient") ||
-                    type.getName().contains("AiConnection")) {
-                    f.setAccessible(true);
-                    try {
-                        Object val = f.get(obj);
-                        if (val != null) {
-                            Logger.d("AiClientHook: field " + cls.getSimpleName() + "." + f.getName() + " -> " + val.getClass().getName());
-                            // 如果是 AiConnection, 递归查找其中的 AiClient
-                            if (!type.getName().contains("AiClient")) {
-                                Object nested = findAiClientInObject(val);
-                                if (nested != null) return nested;
-                            }
-                            return val;
-                        }
-                    } catch (Exception ignored) {}
-                }
+                if (type.isPrimitive() || type == String.class || type == Class.class) continue;
+                f.setAccessible(true);
+                try {
+                    Object val = f.get(obj);
+                    if (val == null) continue;
+                    if (isAiClientClass(val.getClass())) {
+                        Logger.d("AiClientHook: FOUND AiClient in " + obj.getClass().getSimpleName() + "." + f.getName());
+                        return val;
+                    }
+                    // 递归搜索复杂对象 (最多4层)
+                    if (depth < 4 && !type.isPrimitive()) {
+                        Object nested = findAiClientInObject(val, depth + 1, visited);
+                        if (nested != null) return nested;
+                    }
+                } catch (Exception ignored) {}
             }
             cls = cls.getSuperclass();
         }
         return null;
+    }
+
+    private static boolean isAiClientClass(Class<?> cls) {
+        while (cls != null) {
+            String name = cls.getName();
+            if (name.contains("AbsAiClient") || name.equals("com.xiaomi.ai.conn.basic.AiClient")) return true;
+            cls = cls.getSuperclass();
+        }
+        return false;
     }
 
     /**
