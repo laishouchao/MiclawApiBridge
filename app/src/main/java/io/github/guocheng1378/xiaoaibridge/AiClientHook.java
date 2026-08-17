@@ -577,12 +577,27 @@ public class AiClientHook {
                 }
             }
         } else {
-            Logger.d("AiClientHook: no channel captured, trying search...");
+            Logger.d("AiClientHook: no channel captured, trying direct send...");
+            // sendViaPostEvent uses cr0.g.sendEvent(), doesn't need Channel instance
+            boolean sent = sendViaPostEvent(text);
+            if (sent) {
+                Logger.d("AiClientHook: sent via cr0.g.sendEvent (no channel), waiting...");
+                boolean completed = awaitResponse();
+                synchronized (lock) {
+                    String reply = lastReply != null ? lastReply : "";
+                    String error = lastError;
+                    if (!completed && error == null) error = "TIMEOUT";
+                    return new CliClient.CliResult(reply, error, chatId, lastFrames);
+                }
+            }
+
+            // Try searching for Channel instance as fallback
+            Logger.d("AiClientHook: direct send failed, trying Channel search...");
             Object channel = findChannelInstance();
             if (channel != null) {
                 capturedChannel = channel;
                 Logger.d("AiClientHook: found Channel via search: " + channel.getClass().getName());
-                boolean sent = sendViaPostEvent(text);
+                sent = sendViaPostEvent(text);
                 if (sent) {
                     Logger.d("AiClientHook: sent via postEvent (searched), waiting...");
                     boolean completed = awaitResponse();
@@ -1206,7 +1221,7 @@ public class AiClientHook {
                 (java.util.Map<android.os.IBinder, android.app.Service>) mServicesField.get(at);
             if (services != null) {
                 for (android.app.Service svc : services.values()) {
-                    Object channel = findObjectByClassName(svc, CLS_CHANNEL);
+                    Object channel = findObjectByClassName(svc, CLS_CHANNEL_WRAPPER);
                     if (channel != null) return channel;
                 }
             }
@@ -1215,7 +1230,7 @@ public class AiClientHook {
             currentApp.setAccessible(true);
             android.app.Application app = (android.app.Application) currentApp.invoke(null);
             if (app != null) {
-                return findObjectByClassName(app, CLS_CHANNEL);
+                return findObjectByClassName(app, CLS_CHANNEL_WRAPPER);
             }
         } catch (Exception e) {
             Logger.e("AiClientHook: findChannelInstance failed: " + e.getMessage());
