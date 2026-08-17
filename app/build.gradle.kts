@@ -19,9 +19,9 @@ android {
         // 密钥文件已入库 (keystore/xiaoaibridge.jks), 个人模块使用; 生产项目建议改用 GitHub Secrets
         create("release") {
             storeFile = rootProject.file("keystore/xiaoaibridge.jks")
-            storePassword = "xiaoaibridge123"
-            keyAlias = "xiaoaibridge"
-            keyPassword = "xiaoaibridge123"
+            storePassword = "miclaw123"
+            keyAlias = "miclaw"
+            keyPassword = "miclaw123"
         }
     }
 
