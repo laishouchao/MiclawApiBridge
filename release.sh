@@ -68,7 +68,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 SRC_REPO="guocheng1378/MiclawApiBridge"
-MARKET_REPO="Xposed-Modules-Repo/io.github.guocheng1378.miclawbridge"
+MARKET_REPO="Xposed-Modules-Repo/io.github.guocheng1378.xiaoaibridge"
 
 echo "=============================================="
 echo "🚀 MiclawApiBridge 发布 v$VERSION"
