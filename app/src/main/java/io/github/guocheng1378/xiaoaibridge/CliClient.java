@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
@@ -283,7 +283,7 @@ public class CliClient {
                 if (arr != null && arr.length() > 0) {
                     JSONObject a = arr.getJSONObject(0);
                     Config.defaultAgentId = a.optString("id", "osbot.main");
-                    Config.agentName = a.optString("name", "MiClaw");
+                    Config.agentName = a.optString("name", "XiaoAi");
                     Logger.d("Agent: " + Config.defaultAgentId
                         + " (" + Config.agentName + ")");
                 }

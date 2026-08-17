@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.content.Context;
 import android.os.Process;
@@ -44,7 +44,7 @@ public class BridgeStarter {
             Config.loadFrom(appCtx);
             HttpServer server = new HttpServer(appCtx);
             server.start();
-            Logger.d("Miclaw API Bridge started (v3.7 voiceassist-channel-request) build=27");
+            Logger.d("XiaoAi Bridge started (v5.0.0) build=50");
         } catch (Throwable t) {
             Logger.e("Bridge start failed", t);
             started.set(false);

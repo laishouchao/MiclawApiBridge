@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.content.Context;
 
@@ -93,7 +93,7 @@ public class HookEntry extends XposedModule {
                     if (ctx != null) {
                         hookChannelCommunication(param.getDefaultClassLoader());
                         BridgeStarter.start(ctx);
-                        Logger.d("MiclawBridge v3.5 started (attach) - Channel+Request approach");
+                        Logger.d("XiaoAiBridge v3.5 started (attach) - Channel+Request approach");
                     }
                 } catch (Throwable t) {
                     Logger.e("HookEntry: start via attach failed", t);
@@ -117,7 +117,7 @@ public class HookEntry extends XposedModule {
             Context ctx = (Context) currentApp.invoke(null);
             if (ctx != null) {
                 BridgeStarter.start(ctx);
-                Logger.d("MiclawBridge v3.5 started (onPackageReady fallback)");
+                Logger.d("XiaoAiBridge v3.5 started (onPackageReady fallback)");
             }
         } catch (Throwable t) {
             Logger.e("HookEntry: onPackageReady fallback failed", t);
@@ -289,6 +289,23 @@ public class HookEntry extends XposedModule {
             return;
         }
         Logger.d("HookEntry: found ChannelListener class: " + listenerClass.getName());
+
+        // v4.1: Hook 构造函数, 捕获 ChannelListener 实例
+        for (Constructor<?> ctor : listenerClass.getDeclaredConstructors()) {
+            ctor.setAccessible(true);
+            hook(ctor).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Object listener = chain.getThisObject();
+                    AiClientHook.setChannelListener(listener);
+                    Logger.d("HookEntry: ChannelListener CREATED: " + listener.getClass().getName());
+                } catch (Throwable t) {
+                    Logger.e("HookEntry: ChannelListener ctor hook error: " + t.getMessage());
+                }
+                return result;
+            });
+        }
+        Logger.d("HookEntry: hooked ChannelListener constructors");
 
         // 先列出所有方法
         StringBuilder clMethods = new StringBuilder("ChannelListener methods: ");

@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.app.Activity;
 import android.content.Context;
@@ -23,7 +23,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 
 /**
- * MiclawApiBridge v2.0 设置界面 (纯原生组件, 无外部依赖, 稳定防闪退)
+ * XiaoAiApiBridge v2.0 设置界面 (纯原生组件, 无外部依赖, 稳定防闪退)
  *
  * 配置项:
  *  - HTTP 端口 (默认 8787, 被占自动避让)
@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
 
         // ---------- 标题 ----------
         TextView tvTitle = new TextView(this);
-        tvTitle.setText("Miclaw API Bridge v2.0");
+        tvTitle.setText("XiaoAi API Bridge v2.0");
         tvTitle.setTextSize(22);
         tvTitle.setTypeface(null, Typeface.BOLD);
         tvTitle.setTextColor(Color.parseColor("#1A73E8"));

@@ -4,4 +4,4 @@
     public <init>();
 }
 
--keep public class io.github.guocheng1378.miclawbridge.HookEntry { *; }
+-keep public class io.github.guocheng1378.xiaoaibridge.HookEntry { *; }

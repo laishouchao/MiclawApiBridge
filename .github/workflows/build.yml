@@ -35,7 +35,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MiclawApiBridge-apk
+          name: XiaoAiBridge-apk
           path: app/build/outputs/apk/release/*.apk
 
       - name: Create GitHub Release

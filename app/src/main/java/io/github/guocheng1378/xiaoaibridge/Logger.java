@@ -1,9 +1,9 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.util.Log;
 
 public class Logger {
-    private static final String TAG = "MiclawBridge";
+    private static final String TAG = "XiaoAiBridge";
 
     public static void d(String msg) {
         Log.d(TAG, msg);

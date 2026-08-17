@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+build/
+app/build/
+*.apk
+*.ap_
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.codegraph/
+
+# Android
+local.properties
+apk_output/
+artifact.zip
+
+# Build scripts
+*.py
+!release.sh
+commit_msg.txt
+dispatch_body.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -112,7 +112,7 @@ public class OpenAiCompat {
                 model.put("id", m[0]);
                 model.put("object", "model");
                 model.put("created", System.currentTimeMillis() / 1000);
-                model.put("owned_by", "miclaw");
+                model.put("owned_by", "xiaoaibridge");
                 model.put("description", m[1]);
                 data.put(model);
             }

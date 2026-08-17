@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.content.Context;
 import org.json.JSONObject;
@@ -157,7 +157,7 @@ public class HttpServer {
                 sendResponse(os, 200, "{}");
             } else if ("/".equals(path)) {
                 JSONObject r = new JSONObject();
-                r.put("name", "MiclawApiBridge");
+                r.put("name", "XiaoAiApiBridge");
                 r.put("version", "2.2.0");
                 r.put("docs", "/openapi.json");
                 r.put("models", "/v1/models");
@@ -448,9 +448,9 @@ public class HttpServer {
                 }
                 if (cStr.isEmpty()) continue;
                 if ("system".equals(role)) sb.append("系统设定：").append(cStr).append("\n");
-                else if ("assistant".equals(role)) sb.append("助手: ").append(cStr).append("\n");
+                else if ("assistant".equals(role)) sb.append(isVoiceAssist ? "" : "助手: ").append(cStr).append("\n");
                 else if ("tool".equals(role)) sb.append("[工具结果] ").append(cStr).append(" [/工具结果]\n");
-                else sb.append("用户: ").append(cStr).append("\n");
+                else sb.append(isVoiceAssist ? "" : "用户: ").append(cStr).append("\n");
             }
         }
 

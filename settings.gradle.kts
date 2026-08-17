@@ -16,5 +16,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "MiclawApiBridge"
+rootProject.name = "XiaoAiBridge"
 include(":app")

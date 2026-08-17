@@ -1,4 +1,4 @@
-package io.github.guocheng1378.miclawbridge;
+package io.github.guocheng1378.xiaoaibridge;
 
 import android.content.Context;
 import android.content.SharedPreferences;
@@ -7,7 +7,7 @@ import android.content.SharedPreferences;
  * 模块配置: 支持通过设置界面(SharedPreferences)覆盖, 不硬编码敏感信息
  */
 public class Config {
-    public static final String PREFS = "miclaw_config";
+    public static final String PREFS = "xiaoaibridge_config";
 
     // HTTP 服务
     public static int HTTP_PORT = 8787;
